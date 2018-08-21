@@ -29,6 +29,7 @@ import (
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 	authenticationapi "k8s.io/kubernetes/pkg/apis/authentication"
+	authenticationvalidation "k8s.io/kubernetes/pkg/apis/authentication/validation"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	token "k8s.io/kubernetes/pkg/serviceaccount"
 )
@@ -38,22 +39,33 @@ func (r *TokenREST) New() runtime.Object {
 }
 
 type TokenREST struct {
-	svcaccts getter
-	pods     getter
-	secrets  getter
-	issuer   token.TokenGenerator
-	auds     []string
+	svcaccts             getter
+	pods                 getter
+	secrets              getter
+	issuer               token.TokenGenerator
+	auds                 []string
+	maxExpirationSeconds int64
 }
 
 var _ = rest.NamedCreater(&TokenREST{})
 var _ = rest.GroupVersionKindProvider(&TokenREST{})
 
-func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, includeUninitialized bool) (runtime.Object, error) {
+var gvk = schema.GroupVersionKind{
+	Group:   authenticationapiv1.SchemeGroupVersion.Group,
+	Version: authenticationapiv1.SchemeGroupVersion.Version,
+	Kind:    "TokenRequest",
+}
+
+func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
 	if err := createValidation(obj); err != nil {
 		return nil, err
 	}
 
 	out := obj.(*authenticationapi.TokenRequest)
+
+	if errs := authenticationvalidation.ValidateTokenRequest(out); len(errs) != 0 {
+		return nil, errors.NewInvalid(gvk.GroupKind(), "", errs)
+	}
 
 	svcacctObj, err := r.svcaccts.Get(ctx, name, &metav1.GetOptions{})
 	if err != nil {
@@ -100,6 +112,12 @@ func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object,
 	if len(out.Spec.Audiences) == 0 {
 		out.Spec.Audiences = r.auds
 	}
+
+	if r.maxExpirationSeconds > 0 && out.Spec.ExpirationSeconds > r.maxExpirationSeconds {
+		//only positive value is valid
+		out.Spec.ExpirationSeconds = r.maxExpirationSeconds
+	}
+
 	sc, pc := token.Claims(*svcacct, pod, secret, out.Spec.ExpirationSeconds, out.Spec.Audiences)
 	tokdata, err := r.issuer.GenerateToken(sc, pc)
 	if err != nil {
@@ -113,12 +131,8 @@ func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object,
 	return out, nil
 }
 
-func (r *TokenREST) GroupVersionKind(containingGV schema.GroupVersion) schema.GroupVersionKind {
-	return schema.GroupVersionKind{
-		Group:   authenticationapiv1.SchemeGroupVersion.Group,
-		Version: authenticationapiv1.SchemeGroupVersion.Version,
-		Kind:    "TokenRequest",
-	}
+func (r *TokenREST) GroupVersionKind(schema.GroupVersion) schema.GroupVersionKind {
+	return gvk
 }
 
 type getter interface {

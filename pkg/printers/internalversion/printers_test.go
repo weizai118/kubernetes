@@ -46,10 +46,13 @@ import (
 	"k8s.io/kubernetes/pkg/apis/apps"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	"k8s.io/kubernetes/pkg/apis/batch"
+	"k8s.io/kubernetes/pkg/apis/coordination"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/storage"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
+	genericprinters "k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
 	"k8s.io/kubernetes/pkg/printers"
 )
 
@@ -59,6 +62,7 @@ func init() {
 }
 
 var testData = TestStruct{
+	TypeMeta:   metav1.TypeMeta{APIVersion: "foo/bar", Kind: "TestStruct"},
 	Key:        "testValue",
 	Map:        map[string]int{"TestSubkey": 1},
 	StringList: []string{"a", "b", "c"},
@@ -76,27 +80,6 @@ type TestStruct struct {
 
 func (in *TestStruct) DeepCopyObject() runtime.Object {
 	panic("never called")
-}
-
-func TestVersionedPrinter(t *testing.T) {
-	original := &TestPrintType{Data: "value"}
-	p := printers.NewVersionedPrinter(
-		printers.ResourcePrinterFunc(func(obj runtime.Object, w io.Writer) error {
-			if obj == original {
-				t.Fatalf("object should not be identical: %#v", obj)
-			}
-			if obj.(*TestPrintType).Data != "value" {
-				t.Fatalf("object was not converted: %#v", obj)
-			}
-			return nil
-		}),
-		legacyscheme.Scheme,
-		legacyscheme.Scheme,
-		schema.GroupVersion{Group: "", Version: "v1"},
-	)
-	if err := p.PrintObj(original, nil); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
 }
 
 func TestPrintUnstructuredObject(t *testing.T) {
@@ -252,19 +235,20 @@ func testPrinter(t *testing.T, printer printers.ResourcePrinter, unmarshalFunc f
 		t.Errorf("Test data and unmarshaled data are not equal: %v", diff.ObjectDiff(poutput, testData))
 	}
 
-	obj := &api.Pod{
+	obj := &v1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 	}
 	buf.Reset()
 	printer.PrintObj(obj, buf)
-	var objOut api.Pod
+	var objOut v1.Pod
 	// Verify that given function runs without error.
 	err = unmarshalFunc(buf.Bytes(), &objOut)
 	if err != nil {
 		t.Fatalf("unexpected error: %#v", err)
 	}
 	// Use real decode function to undo the versioning process.
-	objOut = api.Pod{}
+	objOut = v1.Pod{}
 	if err := runtime.DecodeInto(s, buf.Bytes(), &objOut); err != nil {
 		t.Fatal(err)
 	}
@@ -274,11 +258,11 @@ func testPrinter(t *testing.T, printer printers.ResourcePrinter, unmarshalFunc f
 }
 
 func TestYAMLPrinter(t *testing.T) {
-	testPrinter(t, &printers.YAMLPrinter{}, yaml.Unmarshal)
+	testPrinter(t, genericprinters.NewTypeSetter(legacyscheme.Scheme).ToPrinter(&genericprinters.YAMLPrinter{}), yaml.Unmarshal)
 }
 
 func TestJSONPrinter(t *testing.T) {
-	testPrinter(t, &printers.JSONPrinter{}, json.Unmarshal)
+	testPrinter(t, genericprinters.NewTypeSetter(legacyscheme.Scheme).ToPrinter(&genericprinters.JSONPrinter{}), json.Unmarshal)
 }
 
 func TestFormatResourceName(t *testing.T) {
@@ -354,12 +338,12 @@ func TestUnknownTypePrinting(t *testing.T) {
 
 func TestTemplatePanic(t *testing.T) {
 	tmpl := `{{and ((index .currentState.info "foo").state.running.startedAt) .currentState.info.net.state.running.startedAt}}`
-	printer, err := printers.NewGoTemplatePrinter([]byte(tmpl))
+	printer, err := genericprinters.NewGoTemplatePrinter([]byte(tmpl))
 	if err != nil {
 		t.Fatalf("tmpl fail: %v", err)
 	}
 	buffer := &bytes.Buffer{}
-	err = printer.PrintObj(&api.Pod{}, buffer)
+	err = printer.PrintObj(&v1.Pod{}, buffer)
 	if err == nil {
 		t.Fatalf("expected that template to crash")
 	}
@@ -374,7 +358,7 @@ func TestNamePrinter(t *testing.T) {
 		expect string
 	}{
 		"singleObject": {
-			&api.Pod{
+			&v1.Pod{
 				TypeMeta: metav1.TypeMeta{
 					Kind: "Pod",
 				},
@@ -384,23 +368,27 @@ func TestNamePrinter(t *testing.T) {
 			},
 			"pod/foo\n"},
 		"List": {
-			&v1.List{
-				TypeMeta: metav1.TypeMeta{
-					Kind: "List",
+			&unstructured.UnstructuredList{
+				Object: map[string]interface{}{
+					"kind":       "List",
+					"apiVersion": "v1",
 				},
-				Items: []runtime.RawExtension{
+				Items: []unstructured.Unstructured{
 					{
-						Raw: []byte(`{"kind": "Pod", "apiVersion": "v1", "metadata": { "name": "foo"}}`),
-					},
-					{
-						Raw: []byte(`{"kind": "Pod", "apiVersion": "v1", "metadata": { "name": "bar"}}`),
+						Object: map[string]interface{}{
+							"kind":       "Pod",
+							"apiVersion": "v1",
+							"metadata": map[string]interface{}{
+								"name": "bar",
+							},
+						},
 					},
 				},
 			},
-			"pod/foo\npod/bar\n"},
+			"pod/bar\n"},
 	}
 
-	printFlags := printers.NewPrintFlags("").WithDefaultOutput("name")
+	printFlags := genericclioptions.NewPrintFlags("").WithTypeSetter(legacyscheme.Scheme).WithDefaultOutput("name")
 	printer, err := printFlags.ToPrinter()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -423,15 +411,15 @@ func TestNamePrinter(t *testing.T) {
 func TestTemplateStrings(t *testing.T) {
 	// This unit tests the "exists" function as well as the template from update.sh
 	table := map[string]struct {
-		pod    api.Pod
+		pod    v1.Pod
 		expect string
 	}{
-		"nilInfo":   {api.Pod{}, "false"},
-		"emptyInfo": {api.Pod{Status: api.PodStatus{ContainerStatuses: []api.ContainerStatus{}}}, "false"},
+		"nilInfo":   {v1.Pod{}, "false"},
+		"emptyInfo": {v1.Pod{Status: v1.PodStatus{ContainerStatuses: []v1.ContainerStatus{}}}, "false"},
 		"fooExists": {
-			api.Pod{
-				Status: api.PodStatus{
-					ContainerStatuses: []api.ContainerStatus{
+			v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
 						{
 							Name: "foo",
 						},
@@ -441,9 +429,9 @@ func TestTemplateStrings(t *testing.T) {
 			"false",
 		},
 		"barExists": {
-			api.Pod{
-				Status: api.PodStatus{
-					ContainerStatuses: []api.ContainerStatus{
+			v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
 						{
 							Name: "bar",
 						},
@@ -453,9 +441,9 @@ func TestTemplateStrings(t *testing.T) {
 			"false",
 		},
 		"bothExist": {
-			api.Pod{
-				Status: api.PodStatus{
-					ContainerStatuses: []api.ContainerStatus{
+			v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
 						{
 							Name: "foo",
 						},
@@ -468,16 +456,16 @@ func TestTemplateStrings(t *testing.T) {
 			"false",
 		},
 		"barValid": {
-			api.Pod{
-				Status: api.PodStatus{
-					ContainerStatuses: []api.ContainerStatus{
+			v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
 						{
 							Name: "foo",
 						},
 						{
 							Name: "bar",
-							State: api.ContainerState{
-								Running: &api.ContainerStateRunning{
+							State: v1.ContainerState{
+								Running: &v1.ContainerStateRunning{
 									StartedAt: metav1.Time{},
 								},
 							},
@@ -488,21 +476,21 @@ func TestTemplateStrings(t *testing.T) {
 			"false",
 		},
 		"bothValid": {
-			api.Pod{
-				Status: api.PodStatus{
-					ContainerStatuses: []api.ContainerStatus{
+			v1.Pod{
+				Status: v1.PodStatus{
+					ContainerStatuses: []v1.ContainerStatus{
 						{
 							Name: "foo",
-							State: api.ContainerState{
-								Running: &api.ContainerStateRunning{
+							State: v1.ContainerState{
+								Running: &v1.ContainerStateRunning{
 									StartedAt: metav1.Time{},
 								},
 							},
 						},
 						{
 							Name: "bar",
-							State: api.ContainerState{
-								Running: &api.ContainerStateRunning{
+							State: v1.ContainerState{
+								Running: &v1.ContainerStateRunning{
 									StartedAt: metav1.Time{},
 								},
 							},
@@ -515,12 +503,10 @@ func TestTemplateStrings(t *testing.T) {
 	}
 	// The point of this test is to verify that the below template works.
 	tmpl := `{{if (exists . "status" "containerStatuses")}}{{range .status.containerStatuses}}{{if (and (eq .name "foo") (exists . "state" "running"))}}true{{end}}{{end}}{{end}}`
-	p, err := printers.NewGoTemplatePrinter([]byte(tmpl))
+	printer, err := genericprinters.NewGoTemplatePrinter([]byte(tmpl))
 	if err != nil {
 		t.Fatalf("tmpl fail: %v", err)
 	}
-
-	printer := printers.NewVersionedPrinter(p, legacyscheme.Scheme, legacyscheme.Scheme, schema.GroupVersion{Group: "", Version: "v1"})
 
 	for name, item := range table {
 		buffer := &bytes.Buffer{}
@@ -549,49 +535,37 @@ func TestPrinters(t *testing.T) {
 		jsonpathPrinter  printers.ResourcePrinter
 	)
 
-	templatePrinter, err = printers.NewGoTemplatePrinter([]byte("{{.name}}"))
+	templatePrinter, err = genericprinters.NewGoTemplatePrinter([]byte("{{.name}}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	templatePrinter = printers.NewVersionedPrinter(templatePrinter, legacyscheme.Scheme, legacyscheme.Scheme, v1.SchemeGroupVersion)
 
-	templatePrinter2, err = printers.NewGoTemplatePrinter([]byte("{{len .items}}"))
+	templatePrinter2, err = genericprinters.NewGoTemplatePrinter([]byte("{{len .items}}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	templatePrinter2 = printers.NewVersionedPrinter(templatePrinter2, legacyscheme.Scheme, legacyscheme.Scheme, v1.SchemeGroupVersion)
 
-	jsonpathPrinter, err = printers.NewJSONPathPrinter("{.metadata.name}")
+	jsonpathPrinter, err = genericprinters.NewJSONPathPrinter("{.metadata.name}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	jsonpathPrinter = printers.NewVersionedPrinter(jsonpathPrinter, legacyscheme.Scheme, legacyscheme.Scheme, v1.SchemeGroupVersion)
 
-	allPrinters := map[string]printers.ResourcePrinter{
-		"humanReadable": printers.NewHumanReadablePrinter(nil, printers.PrintOptions{
-			NoHeaders: true,
-		}),
-		"humanReadableHeaders": printers.NewHumanReadablePrinter(nil, printers.PrintOptions{}),
-		"json":                 &printers.JSONPrinter{},
-		"yaml":                 &printers.YAMLPrinter{},
-		"template":             templatePrinter,
-		"template2":            templatePrinter2,
-		"jsonpath":             jsonpathPrinter,
-		"name": &printers.NamePrinter{
-			Typer:    legacyscheme.Scheme,
-			Decoders: []runtime.Decoder{legacyscheme.Codecs.UniversalDecoder(), unstructured.UnstructuredJSONScheme},
-		},
+	genericPrinters := map[string]printers.ResourcePrinter{
+		// TODO(juanvallejo): move "generic printer" tests to pkg/kubectl/genericclioptions/printers
+		"json":      genericprinters.NewTypeSetter(legacyscheme.Scheme).ToPrinter(&genericprinters.JSONPrinter{}),
+		"yaml":      genericprinters.NewTypeSetter(legacyscheme.Scheme).ToPrinter(&genericprinters.YAMLPrinter{}),
+		"template":  templatePrinter,
+		"template2": templatePrinter2,
+		"jsonpath":  jsonpathPrinter,
 	}
-	AddHandlers((allPrinters["humanReadable"]).(*printers.HumanReadablePrinter))
-	AddHandlers((allPrinters["humanReadableHeaders"]).(*printers.HumanReadablePrinter))
 	objects := map[string]runtime.Object{
-		"pod":             &api.Pod{ObjectMeta: om("pod")},
-		"emptyPodList":    &api.PodList{},
-		"nonEmptyPodList": &api.PodList{Items: []api.Pod{{}}},
-		"endpoints": &api.Endpoints{
-			Subsets: []api.EndpointSubset{{
-				Addresses: []api.EndpointAddress{{IP: "127.0.0.1"}, {IP: "localhost"}},
-				Ports:     []api.EndpointPort{{Port: 8080}},
+		"pod":             &v1.Pod{ObjectMeta: om("pod")},
+		"emptyPodList":    &v1.PodList{},
+		"nonEmptyPodList": &v1.PodList{Items: []v1.Pod{{}}},
+		"endpoints": &v1.Endpoints{
+			Subsets: []v1.EndpointSubset{{
+				Addresses: []v1.EndpointAddress{{IP: "127.0.0.1"}, {IP: "localhost"}},
+				Ports:     []v1.EndpointPort{{Port: 8080}},
 			}}},
 	}
 	// map of printer name to set of objects it should fail on.
@@ -600,7 +574,29 @@ func TestPrinters(t *testing.T) {
 		"jsonpath":  sets.NewString("emptyPodList", "nonEmptyPodList", "endpoints"),
 	}
 
-	for pName, p := range allPrinters {
+	for pName, p := range genericPrinters {
+		for oName, obj := range objects {
+			b := &bytes.Buffer{}
+			if err := p.PrintObj(obj, b); err != nil {
+				if set, found := expectedErrors[pName]; found && set.Has(oName) {
+					// expected error
+					continue
+				}
+				t.Errorf("printer '%v', object '%v'; error: '%v'", pName, oName, err)
+			}
+		}
+	}
+
+	// a humanreadable printer deals with internal-versioned objects
+	humanReadablePrinter := map[string]printers.ResourcePrinter{
+		"humanReadable": printers.NewHumanReadablePrinter(nil, printers.PrintOptions{
+			NoHeaders: true,
+		}),
+		"humanReadableHeaders": printers.NewHumanReadablePrinter(nil, printers.PrintOptions{}),
+	}
+	AddHandlers((humanReadablePrinter["humanReadable"]).(*printers.HumanReadablePrinter))
+	AddHandlers((humanReadablePrinter["humanReadableHeaders"]).(*printers.HumanReadablePrinter))
+	for pName, p := range humanReadablePrinter {
 		for oName, obj := range objects {
 			b := &bytes.Buffer{}
 			if err := p.PrintObj(obj, b); err != nil {
@@ -1103,6 +1099,7 @@ func TestPrintHunmanReadableIngressWithColumnLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifyTable(t, table)
 	if err := printers.PrintTable(table, buff, printers.PrintOptions{NoHeaders: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -1232,6 +1229,7 @@ func TestPrintHumanReadableService(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			verifyTable(t, table)
 			if err := printers.PrintTable(table, buff, printers.PrintOptions{NoHeaders: true}); err != nil {
 				t.Fatal(err)
 			}
@@ -1510,6 +1508,7 @@ func TestPrintPodTable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		buf := &bytes.Buffer{}
 		p := printers.NewHumanReadablePrinter(nil, test.opts).With(AddHandlers).AddTabWriter(false)
 		if err := p.PrintObj(table, buf); err != nil {
@@ -1550,7 +1549,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test container error overwrites pod phase
@@ -1565,7 +1564,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "ContainerWaitingReason", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "ContainerWaitingReason", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test the same as the above but with Terminated state and the first container overwrites the rest
@@ -1580,7 +1579,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test3", "0/2", "ContainerWaitingReason", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test3", "0/2", "ContainerWaitingReason", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test ready is not enough for reporting running
@@ -1595,7 +1594,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test4", "1/2", "podPhase", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test4", "1/2", "podPhase", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test ready is not enough for reporting running
@@ -1611,7 +1610,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test5", "1/2", "podReason", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test5", "1/2", "podReason", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test pod has 2 containers, one is running and the other is completed.
@@ -1627,7 +1626,7 @@ func TestPrintPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test6", "1/2", "Running", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test6", "1/2", "Running", int64(6), "<unknown>"}}},
 		},
 	}
 
@@ -1668,7 +1667,7 @@ func TestPrintPodwide(t *testing.T) {
 					NominatedNodeName: "node1",
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>", "1.1.1.1", "test1", "node1"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>", "1.1.1.1", "test1", "node1"}}},
 		},
 		{
 			// Test when the NodeName and PodIP are none
@@ -1687,7 +1686,7 @@ func TestPrintPodwide(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "ContainerWaitingReason", 6, "<unknown>", "<none>", "<none>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "ContainerWaitingReason", int64(6), "<unknown>", "<none>", "<none>", "<none>"}}},
 		},
 	}
 
@@ -1737,7 +1736,7 @@ func TestPrintPodList(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "2/2", "podPhase", 6, "<unknown>"}}, {Cells: []interface{}{"test2", "1/1", "podPhase", 1, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "2/2", "podPhase", int64(6), "<unknown>"}}, {Cells: []interface{}{"test2", "1/1", "podPhase", int64(1), "<unknown>"}}},
 		},
 	}
 
@@ -1774,7 +1773,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "Running", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "Running", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test pod phase Pending should be printed
@@ -1789,7 +1788,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "Pending", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test2", "1/2", "Pending", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test pod phase Unknown should be printed
@@ -1804,7 +1803,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test3", "1/2", "Unknown", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test3", "1/2", "Unknown", int64(6), "<unknown>"}}},
 		},
 		{
 			// Test pod phase Succeeded shouldn't be printed
@@ -1819,7 +1818,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test4", "1/2", "Succeeded", 6, "<unknown>"}, Conditions: podSuccessConditions}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test4", "1/2", "Succeeded", int64(6), "<unknown>"}, Conditions: podSuccessConditions}},
 		},
 		{
 			// Test pod phase Failed shouldn't be printed
@@ -1834,7 +1833,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 					},
 				},
 			},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test5", "1/2", "Failed", 6, "<unknown>"}, Conditions: podFailedConditions}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test5", "1/2", "Failed", int64(6), "<unknown>"}, Conditions: podFailedConditions}},
 		},
 	}
 
@@ -1843,6 +1842,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		rows := table.Rows
 		for i := range rows {
 			rows[i].Object.Object = nil
@@ -1876,7 +1876,7 @@ func TestPrintPodWithLabels(t *testing.T) {
 				},
 			},
 			[]string{"col1", "COL2"},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>", "asd", "zxc"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>", "asd", "zxc"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -1895,7 +1895,7 @@ func TestPrintPodWithLabels(t *testing.T) {
 				},
 			},
 			[]string{},
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>"}}},
 		},
 	}
 
@@ -1904,6 +1904,7 @@ func TestPrintPodWithLabels(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		rows := table.Rows
 		for i := range rows {
 			rows[i].Object.Object = nil
@@ -1918,18 +1919,43 @@ type stringTestList []struct {
 	name, got, exp string
 }
 
-func TestTranslateTimestamp(t *testing.T) {
+func TestTranslateTimestampSince(t *testing.T) {
 	tl := stringTestList{
-		{"a while from now", translateTimestamp(metav1.Time{Time: time.Now().Add(2.1e9)}), "<invalid>"},
-		{"almost now", translateTimestamp(metav1.Time{Time: time.Now().Add(1.9e9)}), "0s"},
-		{"now", translateTimestamp(metav1.Time{Time: time.Now()}), "0s"},
-		{"unknown", translateTimestamp(metav1.Time{}), "<unknown>"},
-		{"30 seconds ago", translateTimestamp(metav1.Time{Time: time.Now().Add(-3e10)}), "30s"},
-		{"5 minutes ago", translateTimestamp(metav1.Time{Time: time.Now().Add(-3e11)}), "5m"},
-		{"an hour ago", translateTimestamp(metav1.Time{Time: time.Now().Add(-6e12)}), "1h"},
-		{"2 days ago", translateTimestamp(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -2)}), "2d"},
-		{"months ago", translateTimestamp(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -90)}), "90d"},
-		{"10 years ago", translateTimestamp(metav1.Time{Time: time.Now().UTC().AddDate(-10, 0, 0)}), "10y"},
+		{"a while from now", translateTimestampSince(metav1.Time{Time: time.Now().Add(2.1e9)}), "<invalid>"},
+		{"almost now", translateTimestampSince(metav1.Time{Time: time.Now().Add(1.9e9)}), "0s"},
+		{"now", translateTimestampSince(metav1.Time{Time: time.Now()}), "0s"},
+		{"unknown", translateTimestampSince(metav1.Time{}), "<unknown>"},
+		{"30 seconds ago", translateTimestampSince(metav1.Time{Time: time.Now().Add(-3e10)}), "30s"},
+		{"5 minutes ago", translateTimestampSince(metav1.Time{Time: time.Now().Add(-3e11)}), "5m"},
+		{"an hour ago", translateTimestampSince(metav1.Time{Time: time.Now().Add(-6e12)}), "100m"},
+		{"2 days ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -2)}), "2d"},
+		{"months ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -90)}), "90d"},
+		{"10 years ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(-10, 0, 0)}), "10y"},
+	}
+	for _, test := range tl {
+		if test.got != test.exp {
+			t.Errorf("On %v, expected '%v', but got '%v'",
+				test.name, test.exp, test.got)
+		}
+	}
+}
+
+func TestTranslateTimestampUntil(t *testing.T) {
+	// Since this method compares the time with time.Now() internally,
+	// small buffers of 0.1 seconds are added on comparing times to consider method call overhead.
+	// Otherwise, the output strings become shorter than expected.
+	const buf = 1e8
+	tl := stringTestList{
+		{"a while ago", translateTimestampUntil(metav1.Time{Time: time.Now().Add(-2.1e9)}), "<invalid>"},
+		{"almost now", translateTimestampUntil(metav1.Time{Time: time.Now().Add(-1.9e9)}), "0s"},
+		{"now", translateTimestampUntil(metav1.Time{Time: time.Now()}), "0s"},
+		{"unknown", translateTimestampUntil(metav1.Time{}), "<unknown>"},
+		{"in 30 seconds", translateTimestampUntil(metav1.Time{Time: time.Now().Add(3e10 + buf)}), "30s"},
+		{"in 5 minutes", translateTimestampUntil(metav1.Time{Time: time.Now().Add(3e11 + buf)}), "5m"},
+		{"in an hour", translateTimestampUntil(metav1.Time{Time: time.Now().Add(6e12 + buf)}), "100m"},
+		{"in 2 days", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, 2).Add(buf)}), "2d"},
+		{"in months", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, 90).Add(buf)}), "90d"},
+		{"in 10 years", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(10, 0, 0).Add(buf)}), "10y"},
 	}
 	for _, test := range tl {
 		if test.got != test.exp {
@@ -1987,6 +2013,7 @@ func TestPrintDeployment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -1995,6 +2022,7 @@ func TestPrintDeployment(t *testing.T) {
 		}
 		buf.Reset()
 		table, err = printers.NewTablePrinter().With(AddHandlers).PrintTable(&test.deployment, printers.PrintOptions{Wide: true})
+		verifyTable(t, table)
 		// print deployment with '-o wide' option
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{Wide: true, NoHeaders: true}); err != nil {
 			t.Fatal(err)
@@ -2040,6 +2068,7 @@ func TestPrintDaemonSet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -2051,6 +2080,7 @@ func TestPrintDaemonSet(t *testing.T) {
 }
 
 func TestPrintJob(t *testing.T) {
+	now := time.Now()
 	completions := int32(2)
 	tests := []struct {
 		job    batch.Job
@@ -2069,7 +2099,7 @@ func TestPrintJob(t *testing.T) {
 					Succeeded: 1,
 				},
 			},
-			"job1\t2\t1\t0s\n",
+			"job1\t1/2\t\t0s\n",
 		},
 		{
 			batch.Job{
@@ -2084,7 +2114,40 @@ func TestPrintJob(t *testing.T) {
 					Succeeded: 0,
 				},
 			},
-			"job2\t<none>\t0\t10y\n",
+			"job2\t0/1\t\t10y\n",
+		},
+		{
+			batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job3",
+					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded:      0,
+					StartTime:      &metav1.Time{Time: now.Add(time.Minute)},
+					CompletionTime: &metav1.Time{Time: now.Add(31 * time.Minute)},
+				},
+			},
+			"job3\t0/1\t30m\t10y\n",
+		},
+		{
+			batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job4",
+					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded: 0,
+					StartTime: &metav1.Time{Time: time.Now().Add(-20 * time.Minute)},
+				},
+			},
+			"job4\t0/1\t20m\t10y\n",
 		},
 	}
 
@@ -2094,6 +2157,7 @@ func TestPrintJob(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -2625,6 +2689,7 @@ func TestPrintHPA(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buff, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -2659,7 +2724,7 @@ func TestPrintPodShowLabels(t *testing.T) {
 				},
 			},
 			true,
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>", "COL2=zxc,col1=asd"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>", "COL2=zxc,col1=asd"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -2678,7 +2743,7 @@ func TestPrintPodShowLabels(t *testing.T) {
 				},
 			},
 			false,
-			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", 6, "<unknown>"}}},
+			[]metav1beta1.TableRow{{Cells: []interface{}{"test1", "1/2", "podPhase", int64(6), "<unknown>"}}},
 		},
 	}
 
@@ -2687,6 +2752,7 @@ func TestPrintPodShowLabels(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		rows := table.Rows
 		for i := range rows {
 			rows[i].Object.Object = nil
@@ -2853,6 +2919,7 @@ func TestPrintService(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -2910,6 +2977,7 @@ func TestPrintPodDisruptionBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -2990,6 +3058,7 @@ func TestPrintControllerRevision(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3050,6 +3119,7 @@ func TestPrintReplicaSet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3062,6 +3132,7 @@ func TestPrintReplicaSet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true, Wide: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3160,6 +3231,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3232,6 +3304,7 @@ func TestPrintCronJob(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3275,6 +3348,7 @@ func TestPrintStorageClass(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		verifyTable(t, table)
 		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -3282,5 +3356,68 @@ func TestPrintStorageClass(t *testing.T) {
 			t.Fatalf("Expected: %s, got: %s", test.expect, buf.String())
 		}
 		buf.Reset()
+	}
+}
+
+func TestPrintLease(t *testing.T) {
+	holder1 := "holder1"
+	holder2 := "holder2"
+	tests := []struct {
+		sc     coordination.Lease
+		expect string
+	}{
+		{
+			coordination.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "lease1",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: coordination.LeaseSpec{
+					HolderIdentity: &holder1,
+				},
+			},
+			"lease1\tholder1\t0s\n",
+		},
+		{
+			coordination.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "lease2",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: coordination.LeaseSpec{
+					HolderIdentity: &holder2,
+				},
+			},
+			"lease2\tholder2\t5m\n",
+		},
+	}
+
+	buf := bytes.NewBuffer([]byte{})
+	for _, test := range tests {
+		table, err := printers.NewTablePrinter().With(AddHandlers).PrintTable(&test.sc, printers.PrintOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := printers.PrintTable(table, buf, printers.PrintOptions{NoHeaders: true}); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != test.expect {
+			t.Fatalf("Expected: %s, got: %s", test.expect, buf.String())
+		}
+		buf.Reset()
+	}
+}
+
+func verifyTable(t *testing.T, table *metav1beta1.Table) {
+	var panicErr interface{}
+	func() {
+		defer func() {
+			panicErr = recover()
+		}()
+		table.DeepCopyObject() // cells are untyped, better check that types are JSON types and can be deep copied
+	}()
+
+	if panicErr != nil {
+		t.Errorf("unexpected panic during deepcopy of table %#v: %v", table, panicErr)
 	}
 }

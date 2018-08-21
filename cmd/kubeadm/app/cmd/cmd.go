@@ -22,16 +22,13 @@ import (
 	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
-	"k8s.io/apiserver/pkg/util/flag"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/upgrade"
-
 	// Register the kubeadm configuration types because CLI flag generation
 	// depends on the generated defaults.
-	_ "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/install"
 )
 
-// NewKubeadmCommand return cobra.Command to run kubeadm command
+// NewKubeadmCommand returns cobra.Command to run kubeadm command
 func NewKubeadmCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	cmds := &cobra.Command{
 		Use:   "kubeadm",
@@ -71,7 +68,6 @@ func NewKubeadmCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	}
 
 	cmds.ResetFlags()
-	cmds.SetGlobalNormalizationFunc(flag.WarnWordSepNormalizeFunc)
 
 	cmds.AddCommand(NewCmdCompletion(out, ""))
 	cmds.AddCommand(NewCmdConfig(out))

@@ -52,7 +52,7 @@ func setupAllocator(apiURL string, config *Config, clusterCIDR, serviceCIDR *net
 	sharedInformer := informers.NewSharedInformerFactory(clientSet, 1*time.Hour)
 	ipamController, err := nodeipam.NewNodeIpamController(
 		sharedInformer.Core().V1().Nodes(), config.Cloud, clientSet,
-		clusterCIDR, serviceCIDR, subnetMaskSize, true, config.AllocatorType,
+		clusterCIDR, serviceCIDR, subnetMaskSize, config.AllocatorType,
 	)
 	if err != nil {
 		return nil, shutdownFunc, err
@@ -95,7 +95,7 @@ func runTest(t *testing.T, apiURL string, config *Config, clusterCIDR, serviceCI
 func logResults(allResults []*Results) {
 	jStr, err := json.MarshalIndent(allResults, "", "  ")
 	if err != nil {
-		glog.Errorf("Error formating results: %v", err)
+		glog.Errorf("Error formatting results: %v", err)
 		return
 	}
 	if resultsLogFile != "" {

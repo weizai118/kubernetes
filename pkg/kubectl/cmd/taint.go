@@ -17,10 +17,9 @@ limitations under the License.
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
-
-	"encoding/json"
 
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
@@ -31,21 +30,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	"k8s.io/kubernetes/pkg/printers"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 )
 
 // TaintOptions have the data required to perform the taint operation
 type TaintOptions struct {
-	PrintFlags *printers.PrintFlags
-	ToPrinter  func(string) (printers.ResourcePrinterFunc, error)
+	PrintFlags *genericclioptions.PrintFlags
+	ToPrinter  func(string) (printers.ResourcePrinter, error)
 
 	resources      []string
 	taintsToAdd    []v1.Taint
@@ -88,12 +86,11 @@ var (
 
 func NewCmdTaint(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	options := &TaintOptions{
-		PrintFlags: printers.NewPrintFlags("tainted"),
+		PrintFlags: genericclioptions.NewPrintFlags("tainted").WithTypeSetter(scheme.Scheme),
 		IOStreams:  streams,
 	}
 
 	validArgs := []string{"node"}
-	argAliases := kubectl.ResourceAliases(validArgs)
 
 	cmd := &cobra.Command{
 		Use: "taint NODE NAME KEY_1=VAL_1:TAINT_EFFECT_1 ... KEY_N=VAL_N:TAINT_EFFECT_N",
@@ -112,8 +109,7 @@ func NewCmdTaint(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 				cmdutil.CheckErr(err)
 			}
 		},
-		ValidArgs:  validArgs,
-		ArgAliases: argAliases,
+		ValidArgs: validArgs,
 	}
 
 	options.PrintFlags.AddFlags(cmd)
@@ -127,7 +123,7 @@ func NewCmdTaint(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 
 // Complete adapts from the command line args and factory to the data required.
 func (o *TaintOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) (err error) {
-	namespace, _, err := f.DefaultNamespace()
+	namespace, _, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -151,14 +147,9 @@ func (o *TaintOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 		}
 	}
 
-	o.ToPrinter = func(operation string) (printers.ResourcePrinterFunc, error) {
+	o.ToPrinter = func(operation string) (printers.ResourcePrinter, error) {
 		o.PrintFlags.NamePrintFlags.Operation = operation
-		printer, err := o.PrintFlags.ToPrinter()
-		if err != nil {
-			return nil, err
-		}
-
-		return printer.PrintObj, nil
+		return o.PrintFlags.ToPrinter()
 	}
 
 	if len(o.resources) < 1 {
@@ -172,7 +163,7 @@ func (o *TaintOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 		return cmdutil.UsageErrorf(cmd, err.Error())
 	}
 	o.builder = f.NewBuilder().
-		WithScheme(legacyscheme.Scheme).
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		ContinueOnError().
 		NamespaceParam(namespace).DefaultNamespace()
 	if o.selector != "" {
@@ -212,7 +203,7 @@ func (o TaintOptions) validateFlags() error {
 // Validate checks to the TaintOptions to see if there is sufficient information run the command.
 func (o TaintOptions) Validate() error {
 	resourceType := strings.ToLower(o.resources[0])
-	validResources, isValidResource := append(kubectl.ResourceAliases([]string{"node"}), "node"), false
+	validResources, isValidResource := []string{"node", "nodes"}, false
 	for _, validResource := range validResources {
 		if resourceType == validResource {
 			isValidResource = true
@@ -254,11 +245,7 @@ func (o TaintOptions) RunTaint() error {
 			return err
 		}
 
-		obj, err := legacyscheme.Scheme.ConvertToVersion(info.Object, v1.SchemeGroupVersion)
-		if err != nil {
-			glog.V(1).Info(err)
-			return fmt.Errorf("object was not a node.v1.: %T", info.Object)
-		}
+		obj := info.Object
 		name, namespace := info.Name, info.Namespace
 		oldData, err := json.Marshal(obj)
 		if err != nil {
@@ -294,6 +281,7 @@ func (o TaintOptions) RunTaint() error {
 		if err != nil {
 			return err
 		}
+		outputObj = cmdutil.AsDefaultVersionedOrOriginal(outputObj, mapping)
 
 		printer, err := o.ToPrinter(operation)
 		if err != nil {

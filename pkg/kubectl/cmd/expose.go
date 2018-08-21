@@ -24,20 +24,21 @@ import (
 	"github.com/spf13/cobra"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured/unstructuredscheme"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/polymorphichelpers"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 var (
@@ -83,24 +84,22 @@ var (
 type ExposeServiceOptions struct {
 	FilenameOptions resource.FilenameOptions
 	RecordFlags     *genericclioptions.RecordFlags
-	PrintFlags      *printers.PrintFlags
+	PrintFlags      *genericclioptions.PrintFlags
 	PrintObj        printers.ResourcePrinterFunc
 
 	DryRun           bool
 	EnforceNamespace bool
 
 	Generators                func(string) map[string]kubectl.Generator
-	CanBeExposed              func(kind schema.GroupKind) error
-	ClientForMapping          func(*meta.RESTMapping) (resource.RESTClient, error)
+	CanBeExposed              polymorphichelpers.CanBeExposedFunc
 	MapBasedSelectorForObject func(runtime.Object) (string, error)
-	PortsForObject            func(runtime.Object) ([]string, error)
+	PortsForObject            polymorphichelpers.PortsForObjectFunc
 	ProtocolsForObject        func(runtime.Object) (map[string]string, error)
-	LabelsForObject           func(runtime.Object) (map[string]string, error)
 
 	Namespace string
 	Mapper    meta.RESTMapper
 
-	DynamicClient dynamic.DynamicInterface
+	DynamicClient dynamic.Interface
 	Builder       *resource.Builder
 
 	Recorder genericclioptions.Recorder
@@ -110,7 +109,7 @@ type ExposeServiceOptions struct {
 func NewExposeServiceOptions(ioStreams genericclioptions.IOStreams) *ExposeServiceOptions {
 	return &ExposeServiceOptions{
 		RecordFlags: genericclioptions.NewRecordFlags(),
-		PrintFlags:  printers.NewPrintFlags("exposed"),
+		PrintFlags:  genericclioptions.NewPrintFlags("exposed").WithTypeSetter(scheme.Scheme),
 
 		Recorder:  genericclioptions.NoopRecorder{},
 		IOStreams: ioStreams,
@@ -136,8 +135,7 @@ func NewCmdExposeService(f cmdutil.Factory, streams genericclioptions.IOStreams)
 			cmdutil.CheckErr(o.Complete(f, cmd))
 			cmdutil.CheckErr(o.RunExpose(cmd, args))
 		},
-		ValidArgs:  validArgs,
-		ArgAliases: kubectl.ResourceAliases(validArgs),
+		ValidArgs: validArgs,
 	}
 
 	o.RecordFlags.AddFlags(cmd)
@@ -178,7 +176,7 @@ func (o *ExposeServiceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) e
 	}
 	o.PrintObj = printer.PrintObj
 
-	o.RecordFlags.Complete(f.Command(cmd, false))
+	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
 	if err != nil {
 		return err
@@ -189,20 +187,19 @@ func (o *ExposeServiceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) e
 		return err
 	}
 
-	o.Generators = f.Generators
+	o.Generators = cmdutil.GeneratorFn
 	o.Builder = f.NewBuilder()
-	o.CanBeExposed = f.CanBeExposed
-	o.ClientForMapping = f.ClientForMapping
-	o.MapBasedSelectorForObject = f.MapBasedSelectorForObject
-	o.PortsForObject = f.PortsForObject
-	o.ProtocolsForObject = f.ProtocolsForObject
-	o.Mapper, err = f.RESTMapper()
+	o.CanBeExposed = polymorphichelpers.CanBeExposedFn
+	o.MapBasedSelectorForObject = polymorphichelpers.MapBasedSelectorForObjectFn
+	o.ProtocolsForObject = polymorphichelpers.ProtocolsForObjectFn
+	o.PortsForObject = polymorphichelpers.PortsForObjectFn
+
+	o.Mapper, err = f.ToRESTMapper()
 	if err != nil {
 		return err
 	}
-	o.LabelsForObject = f.LabelsForObject
 
-	o.Namespace, o.EnforceNamespace, err = f.DefaultNamespace()
+	o.Namespace, o.EnforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -212,7 +209,7 @@ func (o *ExposeServiceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) e
 
 func (o *ExposeServiceOptions) RunExpose(cmd *cobra.Command, args []string) error {
 	r := o.Builder.
-		WithScheme(legacyscheme.Scheme).
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		ContinueOnError().
 		NamespaceParam(o.Namespace).DefaultNamespace().
 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
@@ -294,7 +291,7 @@ func (o *ExposeServiceOptions) RunExpose(cmd *cobra.Command, args []string) erro
 		}
 
 		if kubectl.IsZero(params["labels"]) {
-			labels, err := o.LabelsForObject(info.Object)
+			labels, err := meta.NewAccessor().Labels(info.Object)
 			if err != nil {
 				return err
 			}
@@ -315,8 +312,7 @@ func (o *ExposeServiceOptions) RunExpose(cmd *cobra.Command, args []string) erro
 		}
 
 		if inline := cmdutil.GetFlagString(cmd, "overrides"); len(inline) > 0 {
-			codec := runtime.NewCodec(cmdutil.InternalVersionJSONEncoder(), cmdutil.InternalVersionDecoder())
-			object, err = cmdutil.Merge(codec, object, inline)
+			object, err = cmdutil.Merge(scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...), object, inline)
 			if err != nil {
 				return err
 			}
@@ -334,7 +330,7 @@ func (o *ExposeServiceOptions) RunExpose(cmd *cobra.Command, args []string) erro
 		}
 
 		asUnstructured := &unstructured.Unstructured{}
-		if err := legacyscheme.Scheme.Convert(object, asUnstructured, nil); err != nil {
+		if err := scheme.Scheme.Convert(object, asUnstructured, nil); err != nil {
 			return err
 		}
 		gvks, _, err := unstructuredscheme.NewUnstructuredObjectTyper().ObjectKinds(asUnstructured)
@@ -346,7 +342,7 @@ func (o *ExposeServiceOptions) RunExpose(cmd *cobra.Command, args []string) erro
 			return err
 		}
 		// Serialize the object with the annotation applied.
-		actualObject, err := o.DynamicClient.Resource(objMapping.Resource).Namespace(o.Namespace).Create(asUnstructured)
+		actualObject, err := o.DynamicClient.Resource(objMapping.Resource).Namespace(o.Namespace).Create(asUnstructured, metav1.CreateOptions{})
 		if err != nil {
 			return err
 		}

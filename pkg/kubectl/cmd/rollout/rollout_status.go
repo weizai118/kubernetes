@@ -17,20 +17,24 @@ limitations under the License.
 package rollout
 
 import (
+	"context"
 	"fmt"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/polymorphichelpers"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 	"k8s.io/kubernetes/pkg/util/interrupt"
-
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -50,8 +54,7 @@ var (
 )
 
 type RolloutStatusOptions struct {
-	FilenameOptions *resource.FilenameOptions
-	genericclioptions.IOStreams
+	PrintFlags *genericclioptions.PrintFlags
 
 	Namespace        string
 	EnforceNamespace bool
@@ -61,12 +64,15 @@ type RolloutStatusOptions struct {
 	Revision int64
 
 	StatusViewer func(*meta.RESTMapping) (kubectl.StatusViewer, error)
+	Builder      func() *resource.Builder
 
-	Builder *resource.Builder
+	FilenameOptions *resource.FilenameOptions
+	genericclioptions.IOStreams
 }
 
 func NewRolloutStatusOptions(streams genericclioptions.IOStreams) *RolloutStatusOptions {
 	return &RolloutStatusOptions{
+		PrintFlags:      genericclioptions.NewPrintFlags("").WithTypeSetter(scheme.Scheme),
 		FilenameOptions: &resource.FilenameOptions{},
 		IOStreams:       streams,
 		Watch:           true,
@@ -77,7 +83,6 @@ func NewCmdRolloutStatus(f cmdutil.Factory, streams genericclioptions.IOStreams)
 	o := NewRolloutStatusOptions(streams)
 
 	validArgs := []string{"deployment", "daemonset", "statefulset"}
-	argAliases := kubectl.ResourceAliases(validArgs)
 
 	cmd := &cobra.Command{
 		Use: "status (TYPE NAME | TYPE/NAME) [flags]",
@@ -90,28 +95,30 @@ func NewCmdRolloutStatus(f cmdutil.Factory, streams genericclioptions.IOStreams)
 			cmdutil.CheckErr(o.Validate(cmd, args))
 			cmdutil.CheckErr(o.Run())
 		},
-		ValidArgs:  validArgs,
-		ArgAliases: argAliases,
+		ValidArgs: validArgs,
 	}
 
 	usage := "identifying the resource to get from a server."
 	cmdutil.AddFilenameOptionFlags(cmd, o.FilenameOptions, usage)
 	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", o.Watch, "Watch the status of the rollout until it's done.")
 	cmd.Flags().Int64Var(&o.Revision, "revision", o.Revision, "Pin to a specific revision for showing its status. Defaults to 0 (last revision).")
+
 	return cmd
 }
 
 func (o *RolloutStatusOptions) Complete(f cmdutil.Factory, args []string) error {
-	o.Builder = f.NewBuilder()
+	o.Builder = f.NewBuilder
 
 	var err error
-	o.Namespace, o.EnforceNamespace, err = f.DefaultNamespace()
+	o.Namespace, o.EnforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
 
 	o.BuilderArgs = args
-	o.StatusViewer = f.StatusViewer
+	o.StatusViewer = func(mapping *meta.RESTMapping) (kubectl.StatusViewer, error) {
+		return polymorphichelpers.StatusViewerFn(f, mapping)
+	}
 	return nil
 }
 
@@ -119,12 +126,17 @@ func (o *RolloutStatusOptions) Validate(cmd *cobra.Command, args []string) error
 	if len(args) == 0 && cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames) {
 		return cmdutil.UsageErrorf(cmd, "Required resource not specified.")
 	}
+
+	if o.Revision < 0 {
+		return fmt.Errorf("revision must be a positive integer: %v", o.Revision)
+	}
+
 	return nil
 }
 
 func (o *RolloutStatusOptions) Run() error {
-	r := o.Builder.
-		WithScheme(legacyscheme.Scheme).
+	r := o.Builder().
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().
 		FilenameParam(o.EnforceNamespace, o.FilenameOptions).
 		ResourceTypeOrNameArgs(true, o.BuilderArgs...).
@@ -160,13 +172,8 @@ func (o *RolloutStatusOptions) Run() error {
 		return err
 	}
 
-	revision := o.Revision
-	if revision < 0 {
-		return fmt.Errorf("revision must be a positive integer: %v", revision)
-	}
-
 	// check if deployment's has finished the rollout
-	status, done, err := statusViewer.Status(info.Namespace, info.Name, revision)
+	status, done, err := statusViewer.Status(info.Namespace, info.Name, o.Revision)
 	if err != nil {
 		return err
 	}
@@ -187,11 +194,15 @@ func (o *RolloutStatusOptions) Run() error {
 	}
 
 	// if the rollout isn't done yet, keep watching deployment status
-	intr := interrupt.New(nil, w.Stop)
+	// TODO: expose timeout
+	timeout := 0 * time.Second
+	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), timeout)
+	defer cancel()
+	intr := interrupt.New(nil, cancel)
 	return intr.Run(func() error {
-		_, err := watch.Until(0, w, func(e watch.Event) (bool, error) {
+		_, err := watchtools.UntilWithoutRetry(ctx, w, func(e watch.Event) (bool, error) {
 			// print deployment's status
-			status, done, err := statusViewer.Status(info.Namespace, info.Name, revision)
+			status, done, err := statusViewer.Status(info.Namespace, info.Name, o.Revision)
 			if err != nil {
 				return false, err
 			}

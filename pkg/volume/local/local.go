@@ -169,6 +169,7 @@ func (plugin *localVolumePlugin) NewBlockVolumeUnmapper(volName string,
 
 // TODO: check if no path and no topology constraints are ok
 func (plugin *localVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+	fs := v1.PersistentVolumeFilesystem
 	localVolume := &v1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: volumeName,
@@ -179,6 +180,7 @@ func (plugin *localVolumePlugin) ConstructVolumeSpec(volumeName, mountPath strin
 					Path: "",
 				},
 			},
+			VolumeMode: &fs,
 		},
 	}
 	return volume.NewSpecFromPersistentVolume(localVolume, false), nil
@@ -388,6 +390,10 @@ func (m *localVolumeMapper) SetUpDevice() (string, error) {
 	globalPath := util.MakeAbsolutePath(runtime.GOOS, m.globalPath)
 	glog.V(4).Infof("SetupDevice returning path %s", globalPath)
 	return globalPath, nil
+}
+
+func (m *localVolumeMapper) MapDevice(devicePath, globalMapPath, volumeMapPath, volumeMapName string, podUID types.UID) error {
+	return util.MapBlockVolume(devicePath, globalMapPath, volumeMapPath, volumeMapName, podUID)
 }
 
 // localVolumeUnmapper implements the BlockVolumeUnmapper interface for local volumes.

@@ -20,19 +20,20 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/spf13/cobra"
+
+	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/apis/certificates"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	"k8s.io/kubernetes/pkg/printers"
-
-	"github.com/spf13/cobra"
 )
 
 func NewCmdCertificate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
@@ -55,13 +56,13 @@ func NewCmdCertificate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams)
 type CertificateOptions struct {
 	resource.FilenameOptions
 
-	PrintFlags *printers.PrintFlags
+	PrintFlags *genericclioptions.PrintFlags
 	PrintObj   printers.ResourcePrinterFunc
 
 	csrNames    []string
 	outputStyle string
 
-	clientSet internalclientset.Interface
+	clientSet kubernetes.Interface
 	builder   *resource.Builder
 
 	genericclioptions.IOStreams
@@ -81,7 +82,7 @@ func (o *CertificateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 	}
 
 	o.builder = f.NewBuilder()
-	o.clientSet, err = f.ClientSet()
+	o.clientSet, err = f.KubernetesClientSet()
 	if err != nil {
 		return err
 	}
@@ -98,7 +99,7 @@ func (o *CertificateOptions) Validate() error {
 
 func NewCmdCertificateApprove(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	options := CertificateOptions{
-		PrintFlags: printers.NewPrintFlags("approved"),
+		PrintFlags: genericclioptions.NewPrintFlags("approved").WithTypeSetter(scheme.Scheme),
 		IOStreams:  ioStreams,
 	}
 	cmd := &cobra.Command{
@@ -133,18 +134,18 @@ func NewCmdCertificateApprove(f cmdutil.Factory, ioStreams genericclioptions.IOS
 }
 
 func (o *CertificateOptions) RunCertificateApprove(force bool) error {
-	return o.modifyCertificateCondition(o.builder, o.clientSet, force, func(csr *certificates.CertificateSigningRequest) (*certificates.CertificateSigningRequest, bool) {
+	return o.modifyCertificateCondition(o.builder, o.clientSet, force, func(csr *certificatesv1beta1.CertificateSigningRequest) (*certificatesv1beta1.CertificateSigningRequest, bool) {
 		var alreadyApproved bool
 		for _, c := range csr.Status.Conditions {
-			if c.Type == certificates.CertificateApproved {
+			if c.Type == certificatesv1beta1.CertificateApproved {
 				alreadyApproved = true
 			}
 		}
 		if alreadyApproved {
 			return csr, true
 		}
-		csr.Status.Conditions = append(csr.Status.Conditions, certificates.CertificateSigningRequestCondition{
-			Type:           certificates.CertificateApproved,
+		csr.Status.Conditions = append(csr.Status.Conditions, certificatesv1beta1.CertificateSigningRequestCondition{
+			Type:           certificatesv1beta1.CertificateApproved,
 			Reason:         "KubectlApprove",
 			Message:        "This CSR was approved by kubectl certificate approve.",
 			LastUpdateTime: metav1.Now(),
@@ -155,7 +156,7 @@ func (o *CertificateOptions) RunCertificateApprove(force bool) error {
 
 func NewCmdCertificateDeny(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	options := CertificateOptions{
-		PrintFlags: printers.NewPrintFlags("denied"),
+		PrintFlags: genericclioptions.NewPrintFlags("denied").WithTypeSetter(scheme.Scheme),
 		IOStreams:  ioStreams,
 	}
 	cmd := &cobra.Command{
@@ -185,30 +186,30 @@ func NewCmdCertificateDeny(f cmdutil.Factory, ioStreams genericclioptions.IOStre
 }
 
 func (o *CertificateOptions) RunCertificateDeny(force bool) error {
-	return o.modifyCertificateCondition(o.builder, o.clientSet, force, func(csr *certificates.CertificateSigningRequest) (*certificates.CertificateSigningRequest, bool) {
+	return o.modifyCertificateCondition(o.builder, o.clientSet, force, func(csr *certificatesv1beta1.CertificateSigningRequest) (*certificatesv1beta1.CertificateSigningRequest, bool) {
 		var alreadyDenied bool
 		for _, c := range csr.Status.Conditions {
-			if c.Type == certificates.CertificateDenied {
+			if c.Type == certificatesv1beta1.CertificateDenied {
 				alreadyDenied = true
 			}
 		}
 		if alreadyDenied {
 			return csr, true
 		}
-		csr.Status.Conditions = append(csr.Status.Conditions, certificates.CertificateSigningRequestCondition{
-			Type:           certificates.CertificateDenied,
+		csr.Status.Conditions = append(csr.Status.Conditions, certificatesv1beta1.CertificateSigningRequestCondition{
+			Type:           certificatesv1beta1.CertificateDenied,
 			Reason:         "KubectlDeny",
-			Message:        "This CSR was approved by kubectl certificate deny.",
+			Message:        "This CSR was denied by kubectl certificate deny.",
 			LastUpdateTime: metav1.Now(),
 		})
 		return csr, false
 	})
 }
 
-func (options *CertificateOptions) modifyCertificateCondition(builder *resource.Builder, clientSet internalclientset.Interface, force bool, modify func(csr *certificates.CertificateSigningRequest) (*certificates.CertificateSigningRequest, bool)) error {
+func (options *CertificateOptions) modifyCertificateCondition(builder *resource.Builder, clientSet kubernetes.Interface, force bool, modify func(csr *certificatesv1beta1.CertificateSigningRequest) (*certificatesv1beta1.CertificateSigningRequest, bool)) error {
 	var found int
 	r := builder.
-		WithScheme(legacyscheme.Scheme).
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		ContinueOnError().
 		FilenameParam(false, &options.FilenameOptions).
 		ResourceNames("certificatesigningrequest", options.csrNames...).
@@ -220,15 +221,24 @@ func (options *CertificateOptions) modifyCertificateCondition(builder *resource.
 		if err != nil {
 			return err
 		}
-		csr := info.Object.(*certificates.CertificateSigningRequest)
-		csr, hasCondition := modify(csr)
-		if !hasCondition || force {
-			csr, err = clientSet.Certificates().
-				CertificateSigningRequests().
-				UpdateApproval(csr)
-			if err != nil {
-				return err
+		for i := 0; ; i++ {
+			csr := info.Object.(*certificatesv1beta1.CertificateSigningRequest)
+			csr, hasCondition := modify(csr)
+			if !hasCondition || force {
+				csr, err = clientSet.Certificates().
+					CertificateSigningRequests().
+					UpdateApproval(csr)
+				if errors.IsConflict(err) && i < 10 {
+					if err := info.Get(); err != nil {
+						return err
+					}
+					continue
+				}
+				if err != nil {
+					return err
+				}
 			}
+			break
 		}
 		found++
 

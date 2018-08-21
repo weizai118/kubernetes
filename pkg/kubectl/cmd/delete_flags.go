@@ -17,48 +17,18 @@ limitations under the License.
 package cmd
 
 import (
-	"io"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/kubectl"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 )
-
-type FileNameFlags struct {
-	Usage string
-
-	Filenames *[]string
-	Recursive *bool
-}
-
-func (o *FileNameFlags) ToOptions() resource.FilenameOptions {
-	options := resource.FilenameOptions{}
-
-	if o.Recursive != nil {
-		options.Recursive = *o.Recursive
-	}
-	if o.Filenames != nil {
-		options.Filenames = *o.Filenames
-	}
-
-	return options
-}
-
-func (o *FileNameFlags) AddFlags(cmd *cobra.Command) {
-	if o.Recursive != nil {
-		cmd.Flags().BoolVarP(o.Recursive, "recursive", "R", *o.Recursive, "Process the directory used in -f, --filename recursively. Useful when you want to manage related manifests organized within the same directory.")
-	}
-	if o.Filenames != nil {
-		kubectl.AddJsonFilenameFlag(cmd, o.Filenames, "Filename, directory, or URL to files "+o.Usage)
-	}
-}
 
 // PrintFlags composes common printer flag structs
 // used for commands requiring deletion logic.
 type DeleteFlags struct {
-	FileNameFlags *FileNameFlags
+	FileNameFlags *genericclioptions.FileNameFlags
 	LabelSelector *string
 	FieldSelector *string
 
@@ -69,13 +39,14 @@ type DeleteFlags struct {
 	IgnoreNotFound *bool
 	Now            *bool
 	Timeout        *time.Duration
+	Wait           *bool
 	Output         *string
 }
 
-func (f *DeleteFlags) ToOptions(out, errOut io.Writer) *DeleteOptions {
+func (f *DeleteFlags) ToOptions(dynamicClient dynamic.Interface, streams genericclioptions.IOStreams) *DeleteOptions {
 	options := &DeleteOptions{
-		Out:    out,
-		ErrOut: errOut,
+		DynamicClient: dynamicClient,
+		IOStreams:     streams,
 	}
 
 	// add filename options
@@ -115,12 +86,15 @@ func (f *DeleteFlags) ToOptions(out, errOut io.Writer) *DeleteOptions {
 	if f.Timeout != nil {
 		options.Timeout = *f.Timeout
 	}
+	if f.Wait != nil {
+		options.WaitForDeletion = *f.Wait
+	}
 
 	return options
 }
 
 func (f *DeleteFlags) AddFlags(cmd *cobra.Command) {
-	f.FileNameFlags.AddFlags(cmd)
+	f.FileNameFlags.AddFlags(cmd.Flags())
 	if f.LabelSelector != nil {
 		cmd.Flags().StringVarP(f.LabelSelector, "selector", "l", *f.LabelSelector, "Selector (label query) to filter on, not including uninitialized ones.")
 	}
@@ -148,11 +122,12 @@ func (f *DeleteFlags) AddFlags(cmd *cobra.Command) {
 	if f.IgnoreNotFound != nil {
 		cmd.Flags().BoolVar(f.IgnoreNotFound, "ignore-not-found", *f.IgnoreNotFound, "Treat \"resource not found\" as a successful delete. Defaults to \"true\" when --all is specified.")
 	}
-
+	if f.Wait != nil {
+		cmd.Flags().BoolVar(f.Wait, "wait", *f.Wait, "If true, wait for resources to be gone before returning. This waits for finalizers.")
+	}
 	if f.Output != nil {
 		cmd.Flags().StringVarP(f.Output, "output", "o", *f.Output, "Output mode. Use \"-o name\" for shorter output (resource/name).")
 	}
-
 }
 
 // NewDeleteCommandFlags provides default flags and values for use with the "delete" command
@@ -169,12 +144,13 @@ func NewDeleteCommandFlags(usage string) *DeleteFlags {
 	labelSelector := ""
 	fieldSelector := ""
 	timeout := time.Duration(0)
+	wait := true
 
 	filenames := []string{}
 	recursive := false
 
 	return &DeleteFlags{
-		FileNameFlags: &FileNameFlags{Usage: usage, Filenames: &filenames, Recursive: &recursive},
+		FileNameFlags: &genericclioptions.FileNameFlags{Usage: usage, Filenames: &filenames, Recursive: &recursive},
 		LabelSelector: &labelSelector,
 		FieldSelector: &fieldSelector,
 
@@ -186,6 +162,7 @@ func NewDeleteCommandFlags(usage string) *DeleteFlags {
 		IgnoreNotFound: &ignoreNotFound,
 		Now:            &now,
 		Timeout:        &timeout,
+		Wait:           &wait,
 		Output:         &output,
 	}
 }
@@ -197,12 +174,13 @@ func NewDeleteFlags(usage string) *DeleteFlags {
 
 	force := false
 	timeout := time.Duration(0)
+	wait := false
 
 	filenames := []string{}
 	recursive := false
 
 	return &DeleteFlags{
-		FileNameFlags: &FileNameFlags{Usage: usage, Filenames: &filenames, Recursive: &recursive},
+		FileNameFlags: &genericclioptions.FileNameFlags{Usage: usage, Filenames: &filenames, Recursive: &recursive},
 
 		Cascade:     &cascade,
 		GracePeriod: &gracePeriod,
@@ -210,5 +188,6 @@ func NewDeleteFlags(usage string) *DeleteFlags {
 		// add non-defaults
 		Force:   &force,
 		Timeout: &timeout,
+		Wait:    &wait,
 	}
 }

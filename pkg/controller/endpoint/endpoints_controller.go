@@ -64,12 +64,8 @@ const (
 	// containers in the pod and marks it "Running", till the kubelet stops all
 	// containers and deletes the pod from the apiserver.
 	// This field is deprecated. v1.Service.PublishNotReadyAddresses will replace it
-	// subsequent releases.
+	// subsequent releases.  It will be removed no sooner than 1.13.
 	TolerateUnreadyEndpointsAnnotation = "service.alpha.kubernetes.io/tolerate-unready-endpoints"
-)
-
-var (
-	keyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
 )
 
 // NewEndpointController returns a new *EndpointController.
@@ -178,7 +174,7 @@ func (e *EndpointController) getPodServiceMemberships(pod *v1.Pod) (sets.String,
 		return set, nil
 	}
 	for i := range services {
-		key, err := keyFunc(services[i])
+		key, err := controller.KeyFunc(services[i])
 		if err != nil {
 			return nil, err
 		}
@@ -334,7 +330,7 @@ func (e *EndpointController) deletePod(obj interface{}) {
 
 // obj could be an *v1.Service, or a DeletionFinalStateUnknown marker item.
 func (e *EndpointController) enqueueService(obj interface{}) {
-	key, err := keyFunc(obj)
+	key, err := controller.KeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %+v: %v", obj, err))
 		return
@@ -385,7 +381,7 @@ func (e *EndpointController) handleErr(err error, key interface{}) {
 func (e *EndpointController) syncService(key string) error {
 	startTime := time.Now()
 	defer func() {
-		glog.V(4).Infof("Finished syncing service %q endpoints. (%v)", key, time.Now().Sub(startTime))
+		glog.V(4).Infof("Finished syncing service %q endpoints. (%v)", key, time.Since(startTime))
 	}()
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -420,7 +416,8 @@ func (e *EndpointController) syncService(key string) error {
 		return err
 	}
 
-	var tolerateUnreadyEndpoints bool
+	// If the user specified the older (deprecated) annotation, we have to respect it.
+	tolerateUnreadyEndpoints := service.Spec.PublishNotReadyAddresses
 	if v, ok := service.Annotations[TolerateUnreadyEndpointsAnnotation]; ok {
 		b, err := strconv.ParseBool(v)
 		if err == nil {
@@ -551,7 +548,7 @@ func (e *EndpointController) checkLeftoverEndpoints() {
 			// as leader-election only have endpoints without service
 			continue
 		}
-		key, err := keyFunc(ep)
+		key, err := controller.KeyFunc(ep)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("Unable to get key for endpoint %#v", ep))
 			continue

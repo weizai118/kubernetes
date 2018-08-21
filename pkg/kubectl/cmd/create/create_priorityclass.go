@@ -32,7 +32,7 @@ var (
 
 	pcExample = templates.Examples(i18n.T(`
 		# Create a priorityclass named high-priority
-		kubectl create priorityclass default-priority --value=1000 --description="high priority"
+		kubectl create priorityclass high-priority --value=1000 --description="high priority"
 
 		# Create a priorityclass named default-priority that considered as the global default priority
 		kubectl create priorityclass default-priority --value=1000 --global-default=true --description="default priority"`))
@@ -56,8 +56,8 @@ func NewCmdCreatePriorityClass(f cmdutil.Factory, ioStreams genericclioptions.IO
 		Long:                  pcLong,
 		Example:               pcExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmdutil.CheckErr(options.Complete(cmd, args))
-			cmdutil.CheckErr(options.Run(f))
+			cmdutil.CheckErr(options.Complete(f, cmd, args))
+			cmdutil.CheckErr(options.Run())
 		},
 	}
 
@@ -73,7 +73,7 @@ func NewCmdCreatePriorityClass(f cmdutil.Factory, ioStreams genericclioptions.IO
 	return cmd
 }
 
-func (o *PriorityClassOpts) Complete(cmd *cobra.Command, args []string) error {
+func (o *PriorityClassOpts) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	name, err := NameFromCommandArgs(cmd, args)
 	if err != nil {
 		return err
@@ -92,10 +92,10 @@ func (o *PriorityClassOpts) Complete(cmd *cobra.Command, args []string) error {
 		return errUnsupportedGenerator(cmd, generatorName)
 	}
 
-	return o.CreateSubcommandOptions.Complete(cmd, args, generator)
+	return o.CreateSubcommandOptions.Complete(f, cmd, args, generator)
 }
 
 // CreatePriorityClass implements the behavior to run the create priorityClass command.
-func (o *PriorityClassOpts) Run(f cmdutil.Factory) error {
-	return RunCreateSubcommand(f, o.CreateSubcommandOptions)
+func (o *PriorityClassOpts) Run() error {
+	return o.CreateSubcommandOptions.Run()
 }

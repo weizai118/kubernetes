@@ -66,8 +66,10 @@ PACKAGES=(
   k8s.io/api/rbac/v1beta1
   k8s.io/api/rbac/v1
   k8s.io/api/certificates/v1beta1
+  k8s.io/api/coordination/v1beta1
   k8s.io/api/imagepolicy/v1alpha1
   k8s.io/api/scheduling/v1alpha1
+  k8s.io/api/scheduling/v1beta1
   k8s.io/api/settings/v1alpha1
   k8s.io/api/storage/v1alpha1
   k8s.io/api/storage/v1beta1
@@ -82,6 +84,7 @@ PACKAGES=(
   k8s.io/metrics/pkg/apis/external_metrics/v1beta1
   k8s.io/apiserver/pkg/apis/audit/v1alpha1
   k8s.io/apiserver/pkg/apis/audit/v1beta1
+  k8s.io/apiserver/pkg/apis/audit/v1
   k8s.io/apiserver/pkg/apis/example2/v1
 )
 

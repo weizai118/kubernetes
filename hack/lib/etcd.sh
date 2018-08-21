@@ -24,6 +24,7 @@ kube::etcd::validate() {
   # validate if in path
   command -v etcd >/dev/null || {
     kube::log::usage "etcd must be in your PATH"
+    kube::log::info "You can use 'hack/install-etcd.sh' to install a copy in third_party/."
     exit 1
   }
 
@@ -71,7 +72,7 @@ kube::etcd::start() {
   if [[ -d "${ARTIFACTS_DIR:-}" ]]; then
     ETCD_LOGFILE="${ARTIFACTS_DIR}/etcd.$(uname -n).$(id -un).log.DEBUG.$(date +%Y%m%d-%H%M%S).$$"
   else
-    ETCD_LOGFILE=/dev/null
+    ETCD_LOGFILE=${ETCD_LOGFILE:-"/dev/null"}
   fi
   kube::log::info "etcd --advertise-client-urls http://${ETCD_HOST}:${ETCD_PORT} --data-dir ${ETCD_DIR} --listen-client-urls http://${ETCD_HOST}:${ETCD_PORT} --debug > \"${ETCD_LOGFILE}\" 2>/dev/null"
   etcd --advertise-client-urls http://${ETCD_HOST}:${ETCD_PORT} --data-dir ${ETCD_DIR} --listen-client-urls http://${ETCD_HOST}:${ETCD_PORT} --debug 2> "${ETCD_LOGFILE}" >/dev/null &
@@ -102,11 +103,13 @@ kube::etcd::cleanup() {
 
 kube::etcd::install() {
   (
+    local os
     cd "${KUBE_ROOT}/third_party"
-    if [[ $(readlink etcd) == etcd-v${ETCD_VERSION}-* ]]; then
+    os=$(uname | tr "[:upper:]" "[:lower:]")
+    if [[ $(readlink etcd) == etcd-v${ETCD_VERSION}-${os}-* ]]; then
       return  # already installed
     fi
-    if [[ $(uname) == "Darwin" ]]; then
+    if [[ ${os} == "darwin" ]]; then
       download_file="etcd-v${ETCD_VERSION}-darwin-amd64.zip"
       url="https://github.com/coreos/etcd/releases/download/v${ETCD_VERSION}/${download_file}"
       kube::util::download_file "${url}" "${download_file}"
@@ -119,6 +122,7 @@ kube::etcd::install() {
       kube::util::download_file "${url}" "${download_file}"
       tar xzf "${download_file}"
       ln -fns "etcd-v${ETCD_VERSION}-linux-amd64" etcd
+      rm "${download_file}"
     fi
     kube::log::info "etcd v${ETCD_VERSION} installed. To use:"
     kube::log::info "export PATH=$(pwd)/etcd:\${PATH}"

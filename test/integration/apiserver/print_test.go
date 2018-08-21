@@ -28,7 +28,7 @@ import (
 
 	batchv2alpha1 "k8s.io/api/batch/v2alpha1"
 	rbacv1alpha1 "k8s.io/api/rbac/v1alpha1"
-	schedulingv1alpha1 "k8s.io/api/scheduling/v1alpha1"
+	schedulerapi "k8s.io/api/scheduling/v1beta1"
 	settingsv1alpha1 "k8s.io/api/settings/v1alpha1"
 	storagev1alpha1 "k8s.io/api/storage/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -40,6 +40,7 @@ import (
 	"k8s.io/gengo/examples/set-gen/sets"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	"k8s.io/kubernetes/test/integration/framework"
@@ -54,7 +55,8 @@ var kindWhiteList = sets.NewString(
 	"ExportOptions",
 	"GetOptions",
 	"ListOptions",
-	"NodeConfigSource",
+	"CreateOptions",
+	"UpdateOptions",
 	"NodeProxyOptions",
 	"PodAttachOptions",
 	"PodExecOptions",
@@ -140,7 +142,7 @@ func TestServerSidePrint(t *testing.T) {
 		batchv2alpha1.SchemeGroupVersion,
 		rbacv1alpha1.SchemeGroupVersion,
 		settingsv1alpha1.SchemeGroupVersion,
-		schedulingv1alpha1.SchemeGroupVersion,
+		schedulerapi.SchemeGroupVersion,
 		storagev1alpha1.SchemeGroupVersion)
 	defer closeFn()
 
@@ -150,14 +152,10 @@ func TestServerSidePrint(t *testing.T) {
 	tableParam := fmt.Sprintf("application/json;as=Table;g=%s;v=%s, application/json", metav1beta1.GroupName, metav1beta1.SchemeGroupVersion.Version)
 	printer := newFakePrinter(printersinternal.AddHandlers)
 
-	configFlags := util.NewTestConfigFlags().
+	configFlags := genericclioptions.NewTestConfigFlags().
 		WithClientConfig(clientcmd.NewDefaultClientConfig(*createKubeConfig(s.URL), &clientcmd.ConfigOverrides{}))
 
 	restConfig, err := configFlags.ToRESTConfig()
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -170,10 +168,15 @@ func TestServerSidePrint(t *testing.T) {
 		os.Remove(cacheDir)
 	}()
 
-	configFlags.WithDiscoveryClient(util.NewCachedDiscoveryClient(discoveryClient, cacheDir, time.Duration(10*time.Minute)))
+	cachedClient, err := discovery.NewCachedDiscoveryClientForConfig(restConfig, cacheDir, "", time.Duration(10*time.Minute))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	configFlags.WithDiscoveryClient(cachedClient)
 
 	factory := util.NewFactory(configFlags)
-	mapper, err := factory.RESTMapper()
+	mapper, err := factory.ToRESTMapper()
 	if err != nil {
 		t.Errorf("unexpected error getting mapper: %v", err)
 		return

@@ -52,7 +52,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/qos"
 	"k8s.io/kubernetes/pkg/kubelet/status"
-	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
+	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
 	utilfile "k8s.io/kubernetes/pkg/util/file"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/util/oom"
@@ -200,19 +201,22 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 		return nil, fmt.Errorf("failed to get mounted cgroup subsystems: %v", err)
 	}
 
-	// Check whether swap is enabled. The Kubelet does not support running with swap enabled.
-	swapData, err := ioutil.ReadFile("/proc/swaps")
-	if err != nil {
-		return nil, err
-	}
-	swapData = bytes.TrimSpace(swapData) // extra trailing \n
-	swapLines := strings.Split(string(swapData), "\n")
+	if failSwapOn {
+		// Check whether swap is enabled. The Kubelet does not support running with swap enabled.
+		swapData, err := ioutil.ReadFile("/proc/swaps")
+		if err != nil {
+			return nil, err
+		}
+		swapData = bytes.TrimSpace(swapData) // extra trailing \n
+		swapLines := strings.Split(string(swapData), "\n")
 
-	// If there is more than one line (table headers) in /proc/swaps, swap is enabled and we should
-	// error out unless --fail-swap-on is set to false.
-	if failSwapOn && len(swapLines) > 1 {
-		return nil, fmt.Errorf("Running with swap on is not supported, please disable swap! or set --fail-swap-on flag to false. /proc/swaps contained: %v", swapLines)
+		// If there is more than one line (table headers) in /proc/swaps, swap is enabled and we should
+		// error out unless --fail-swap-on is set to false.
+		if len(swapLines) > 1 {
+			return nil, fmt.Errorf("Running with swap on is not supported, please disable swap! or set --fail-swap-on flag to false. /proc/swaps contained: %v", swapLines)
+		}
 	}
+
 	var capacity = v1.ResourceList{}
 	// It is safe to invoke `MachineInfo` on cAdvisor before logically initializing cAdvisor here because
 	// machine info is computed and cached once as part of cAdvisor object creation.
@@ -540,12 +544,14 @@ func (cm *containerManagerImpl) Start(node *v1.Node,
 	// allocatable of the node
 	cm.nodeInfo = node
 
-	rootfs, err := cm.cadvisorInterface.RootFsInfo()
-	if err != nil {
-		return fmt.Errorf("failed to get rootfs info: %v", err)
-	}
-	for rName, rCap := range cadvisor.EphemeralStorageCapacityFromFsInfo(rootfs) {
-		cm.capacity[rName] = rCap
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.LocalStorageCapacityIsolation) {
+		rootfs, err := cm.cadvisorInterface.RootFsInfo()
+		if err != nil {
+			return fmt.Errorf("failed to get rootfs info: %v", err)
+		}
+		for rName, rCap := range cadvisor.EphemeralStorageCapacityFromFsInfo(rootfs) {
+			cm.capacity[rName] = rCap
+		}
 	}
 
 	// Ensure that node allocatable configuration is valid.
@@ -596,6 +602,10 @@ func (cm *containerManagerImpl) Start(node *v1.Node,
 	}
 
 	return nil
+}
+
+func (cm *containerManagerImpl) GetPluginRegistrationHandlerCallback() pluginwatcher.RegisterCallbackFn {
+	return cm.deviceManager.GetWatcherCallback()
 }
 
 // TODO: move the GetResources logic to PodContainerManager.

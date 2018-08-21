@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
@@ -418,10 +417,9 @@ func TestAnnotateErrors(t *testing.T) {
 
 	for k, testCase := range testCases {
 		t.Run(k, func(t *testing.T) {
-			tf := cmdtesting.NewTestFactory()
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
 			defer tf.Cleanup()
 
-			tf.Namespace = "test"
 			tf.ClientConfigVal = defaultClientConfig()
 
 			iostreams, _, bufOut, bufErr := genericclioptions.NewTestIOStreams()
@@ -453,10 +451,10 @@ func TestAnnotateErrors(t *testing.T) {
 func TestAnnotateObject(t *testing.T) {
 	pods, _, _ := testData()
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		GroupVersion:         schema.GroupVersion{Group: "testgroup", Version: "v1"},
@@ -485,7 +483,6 @@ func TestAnnotateObject(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	iostreams, _, bufOut, _ := genericclioptions.NewTestIOStreams()
@@ -507,10 +504,10 @@ func TestAnnotateObject(t *testing.T) {
 func TestAnnotateObjectFromFile(t *testing.T) {
 	pods, _, _ := testData()
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		GroupVersion:         schema.GroupVersion{Group: "testgroup", Version: "v1"},
@@ -539,7 +536,6 @@ func TestAnnotateObjectFromFile(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	iostreams, _, bufOut, _ := genericclioptions.NewTestIOStreams()
@@ -560,7 +556,7 @@ func TestAnnotateObjectFromFile(t *testing.T) {
 }
 
 func TestAnnotateLocal(t *testing.T) {
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
 	tf.UnstructuredClient = &fake.RESTClient{
@@ -571,7 +567,6 @@ func TestAnnotateLocal(t *testing.T) {
 			return nil, nil
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	iostreams, _, _, _ := genericclioptions.NewTestIOStreams()
@@ -594,10 +589,10 @@ func TestAnnotateLocal(t *testing.T) {
 func TestAnnotateMultipleObjects(t *testing.T) {
 	pods, _, _ := testData()
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 	tf.UnstructuredClient = &fake.RESTClient{
 		GroupVersion:         schema.GroupVersion{Group: "testgroup", Version: "v1"},
 		NegotiatedSerializer: unstructuredSerializer,
@@ -627,7 +622,6 @@ func TestAnnotateMultipleObjects(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	iostreams, _, _, _ := genericclioptions.NewTestIOStreams()

@@ -38,7 +38,7 @@ import (
 )
 
 func setDesiredConfiguration(initialConfig *kubeletconfig.KubeletConfiguration) {
-	initialConfig.EnforceNodeAllocatable = []string{"pods", "kube-reserved", "system-reserved"}
+	initialConfig.EnforceNodeAllocatable = []string{"pods", kubeReservedCgroup, systemReservedCgroup}
 	initialConfig.SystemReserved = map[string]string{
 		string(v1.ResourceCPU):    "100m",
 		string(v1.ResourceMemory): "100Mi",
@@ -56,7 +56,7 @@ func setDesiredConfiguration(initialConfig *kubeletconfig.KubeletConfiguration) 
 
 var _ = framework.KubeDescribe("Node Container Manager [Serial]", func() {
 	f := framework.NewDefaultFramework("node-container-manager")
-	Describe("Validate Node Allocatable", func() {
+	Describe("Validate Node Allocatable [NodeFeature:NodeAllocatable]", func() {
 		It("set's up the node and runs the test", func() {
 			framework.ExpectNoError(runTest(f))
 		})
@@ -98,8 +98,8 @@ func getAllocatableLimits(cpu, memory string, capacity v1.ResourceList) (*resour
 }
 
 const (
-	kubeReservedCgroup   = "kube_reserved"
-	systemReservedCgroup = "system_reserved"
+	kubeReservedCgroup   = "kube-reserved"
+	systemReservedCgroup = "system-reserved"
 )
 
 func createIfNotExists(cm cm.CgroupManager, cgroupConfig *cm.CgroupConfig) error {

@@ -21,26 +21,34 @@ import (
 	"strconv"
 	"time"
 
+	apimachineryconfigv1alpha1 "k8s.io/apimachinery/pkg/apis/config/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
+	apiserverconfigv1alpha1 "k8s.io/apiserver/pkg/apis/config/v1alpha1"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/master/ports"
-	utilpointer "k8s.io/kubernetes/pkg/util/pointer"
+	utilpointer "k8s.io/utils/pointer"
 )
 
 func addDefaultingFuncs(scheme *kruntime.Scheme) error {
 	return RegisterDefaults(scheme)
 }
 
+func SetDefaults_CloudControllerManagerConfiguration(obj *CloudControllerManagerConfiguration) {
+	zero := metav1.Duration{}
+	if obj.ServiceController.ConcurrentServiceSyncs == 0 {
+		obj.ServiceController.ConcurrentServiceSyncs = 1
+	}
+	if obj.NodeStatusUpdateFrequency == zero {
+		obj.NodeStatusUpdateFrequency = metav1.Duration{Duration: 5 * time.Minute}
+	}
+}
+
 func SetDefaults_KubeControllerManagerConfiguration(obj *KubeControllerManagerConfiguration) {
 	zero := metav1.Duration{}
 	if len(obj.Controllers) == 0 {
 		obj.Controllers = []string{"*"}
-	}
-	// Port
-	if obj.KubeCloudShared.Address == "" {
-		obj.KubeCloudShared.Address = "0.0.0.0"
 	}
 	if obj.EndPointController.ConcurrentEndpointSyncs == 0 {
 		obj.EndPointController.ConcurrentEndpointSyncs = 5
@@ -72,9 +80,6 @@ func SetDefaults_KubeControllerManagerConfiguration(obj *KubeControllerManagerCo
 	if obj.SAController.ConcurrentSATokenSyncs == 0 {
 		obj.SAController.ConcurrentSATokenSyncs = 5
 	}
-	if obj.KubeCloudShared.RouteReconciliationPeriod == zero {
-		obj.KubeCloudShared.RouteReconciliationPeriod = metav1.Duration{Duration: 10 * time.Second}
-	}
 	if obj.ResourceQuotaController.ResourceQuotaSyncPeriod == zero {
 		obj.ResourceQuotaController.ResourceQuotaSyncPeriod = metav1.Duration{Duration: 5 * time.Minute}
 	}
@@ -99,9 +104,6 @@ func SetDefaults_KubeControllerManagerConfiguration(obj *KubeControllerManagerCo
 	if obj.DeploymentController.DeploymentControllerSyncPeriod == zero {
 		obj.DeploymentController.DeploymentControllerSyncPeriod = metav1.Duration{Duration: 30 * time.Second}
 	}
-	if obj.GenericComponent.MinResyncPeriod == zero {
-		obj.GenericComponent.MinResyncPeriod = metav1.Duration{Duration: 12 * time.Hour}
-	}
 	if obj.DeprecatedController.RegisterRetryCount == 0 {
 		obj.DeprecatedController.RegisterRetryCount = 10
 	}
@@ -114,32 +116,11 @@ func SetDefaults_KubeControllerManagerConfiguration(obj *KubeControllerManagerCo
 	if obj.NodeLifecycleController.NodeStartupGracePeriod == zero {
 		obj.NodeLifecycleController.NodeStartupGracePeriod = metav1.Duration{Duration: 60 * time.Second}
 	}
-	if obj.KubeCloudShared.NodeMonitorPeriod == zero {
-		obj.KubeCloudShared.NodeMonitorPeriod = metav1.Duration{Duration: 5 * time.Second}
-	}
-	if obj.KubeCloudShared.ClusterName == "" {
-		obj.KubeCloudShared.ClusterName = "kubernetes"
-	}
 	if obj.NodeIpamController.NodeCIDRMaskSize == 0 {
 		obj.NodeIpamController.NodeCIDRMaskSize = 24
 	}
-	if obj.KubeCloudShared.ConfigureCloudRoutes == nil {
-		obj.KubeCloudShared.ConfigureCloudRoutes = utilpointer.BoolPtr(true)
-	}
 	if obj.PodGCController.TerminatedPodGCThreshold == 0 {
 		obj.PodGCController.TerminatedPodGCThreshold = 12500
-	}
-	if obj.GenericComponent.ContentType == "" {
-		obj.GenericComponent.ContentType = "application/vnd.kubernetes.protobuf"
-	}
-	if obj.GenericComponent.KubeAPIQPS == 0 {
-		obj.GenericComponent.KubeAPIQPS = 20.0
-	}
-	if obj.GenericComponent.KubeAPIBurst == 0 {
-		obj.GenericComponent.KubeAPIBurst = 30
-	}
-	if obj.GenericComponent.ControllerStartInterval == zero {
-		obj.GenericComponent.ControllerStartInterval = metav1.Duration{Duration: 0 * time.Second}
 	}
 	if obj.GarbageCollectorController.EnableGarbageCollector == nil {
 		obj.GarbageCollectorController.EnableGarbageCollector = utilpointer.BoolPtr(true)
@@ -164,6 +145,48 @@ func SetDefaults_KubeControllerManagerConfiguration(obj *KubeControllerManagerCo
 	}
 	if obj.HPAController.HorizontalPodAutoscalerUseRESTClients == nil {
 		obj.HPAController.HorizontalPodAutoscalerUseRESTClients = utilpointer.BoolPtr(true)
+	}
+}
+
+func SetDefaults_GenericComponentConfiguration(obj *GenericComponentConfiguration) {
+	zero := metav1.Duration{}
+	if obj.MinResyncPeriod == zero {
+		obj.MinResyncPeriod = metav1.Duration{Duration: 12 * time.Hour}
+	}
+	if obj.ContentType == "" {
+		obj.ContentType = "application/vnd.kubernetes.protobuf"
+	}
+	if obj.KubeAPIQPS == 0 {
+		obj.KubeAPIQPS = 20.0
+	}
+	if obj.KubeAPIBurst == 0 {
+		obj.KubeAPIBurst = 30
+	}
+	if obj.ControllerStartInterval == zero {
+		obj.ControllerStartInterval = metav1.Duration{Duration: 0 * time.Second}
+	}
+
+	// Use the default LeaderElectionConfiguration options
+	apiserverconfigv1alpha1.RecommendedDefaultLeaderElectionConfiguration(&obj.LeaderElection)
+}
+
+func SetDefaults_KubeCloudSharedConfiguration(obj *KubeCloudSharedConfiguration) {
+	zero := metav1.Duration{}
+	// Port
+	if obj.Address == "" {
+		obj.Address = "0.0.0.0"
+	}
+	if obj.RouteReconciliationPeriod == zero {
+		obj.RouteReconciliationPeriod = metav1.Duration{Duration: 10 * time.Second}
+	}
+	if obj.NodeMonitorPeriod == zero {
+		obj.NodeMonitorPeriod = metav1.Duration{Duration: 5 * time.Second}
+	}
+	if obj.ClusterName == "" {
+		obj.ClusterName = "kubernetes"
+	}
+	if obj.ConfigureCloudRoutes == nil {
+		obj.ConfigureCloudRoutes = utilpointer.BoolPtr(true)
 	}
 }
 
@@ -236,12 +259,10 @@ func SetDefaults_KubeSchedulerConfiguration(obj *KubeSchedulerConfiguration) {
 		obj.MetricsBindAddress = net.JoinHostPort("0.0.0.0", strconv.Itoa(ports.SchedulerPort))
 	}
 
-	if len(obj.ClientConnection.ContentType) == 0 {
-		obj.ClientConnection.ContentType = "application/vnd.kubernetes.protobuf"
-	}
 	if obj.ClientConnection.QPS == 0.0 {
 		obj.ClientConnection.QPS = 50.0
 	}
+
 	if obj.ClientConnection.Burst == 0 {
 		obj.ClientConnection.Burst = 100
 	}
@@ -256,24 +277,13 @@ func SetDefaults_KubeSchedulerConfiguration(obj *KubeSchedulerConfiguration) {
 	if len(obj.FailureDomains) == 0 {
 		obj.FailureDomains = kubeletapis.DefaultFailureDomains
 	}
-}
 
-func SetDefaults_LeaderElectionConfiguration(obj *LeaderElectionConfiguration) {
-	zero := metav1.Duration{}
-	if obj.LeaseDuration == zero {
-		obj.LeaseDuration = metav1.Duration{Duration: 15 * time.Second}
+	if obj.PercentageOfNodesToScore == 0 {
+		// by default, stop finding feasible nodes once the number of feasible nodes is 50% of the cluster.
+		obj.PercentageOfNodesToScore = 50
 	}
-	if obj.RenewDeadline == zero {
-		obj.RenewDeadline = metav1.Duration{Duration: 10 * time.Second}
-	}
-	if obj.RetryPeriod == zero {
-		obj.RetryPeriod = metav1.Duration{Duration: 2 * time.Second}
-	}
-	if obj.ResourceLock == "" {
-		// obj.ResourceLock = rl.EndpointsResourceLock
-		obj.ResourceLock = "endpoints"
-	}
-	if obj.LeaderElect == nil {
-		obj.LeaderElect = utilpointer.BoolPtr(true)
-	}
+
+	// Use the default ClientConnectionConfiguration and LeaderElectionConfiguration options
+	apimachineryconfigv1alpha1.RecommendedDefaultClientConnectionConfiguration(&obj.ClientConnection)
+	apiserverconfigv1alpha1.RecommendedDefaultLeaderElectionConfiguration(&obj.LeaderElection.LeaderElectionConfiguration)
 }

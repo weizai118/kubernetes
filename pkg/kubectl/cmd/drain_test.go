@@ -43,15 +43,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/apis/batch"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 const (
@@ -152,8 +151,8 @@ func TestCordon(t *testing.T) {
 			tf := cmdtesting.NewTestFactory()
 			defer tf.Cleanup()
 
-			codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
-			ns := legacyscheme.Codecs
+			codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+			ns := scheme.Codecs
 
 			new_node := &corev1.Node{}
 			updated := false
@@ -606,8 +605,8 @@ func TestDrain(t *testing.T) {
 				tf := cmdtesting.NewTestFactory()
 				defer tf.Cleanup()
 
-				codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
-				ns := legacyscheme.Codecs
+				codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+				ns := scheme.Codecs
 
 				tf.Client = &fake.RESTClient{
 					GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
@@ -834,7 +833,7 @@ func TestDeletePods(t *testing.T) {
 			defer tf.Cleanup()
 
 			o := DrainOptions{
-				PrintFlags: printers.NewPrintFlags("drained"),
+				PrintFlags: genericclioptions.NewPrintFlags("drained").WithTypeSetter(scheme.Scheme),
 			}
 			o.Out = os.Stdout
 

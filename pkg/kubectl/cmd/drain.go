@@ -34,26 +34,27 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 type DrainOptions struct {
-	PrintFlags *printers.PrintFlags
+	PrintFlags *genericclioptions.PrintFlags
 	ToPrinter  func(string) (printers.ResourcePrinterFunc, error)
 
 	Namespace          string
@@ -107,7 +108,7 @@ var (
 
 func NewCmdCordon(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	options := &DrainOptions{
-		PrintFlags: printers.NewPrintFlags("cordoned"),
+		PrintFlags: genericclioptions.NewPrintFlags("cordoned").WithTypeSetter(scheme.Scheme),
 
 		IOStreams: ioStreams,
 	}
@@ -139,7 +140,7 @@ var (
 
 func NewCmdUncordon(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	options := &DrainOptions{
-		PrintFlags: printers.NewPrintFlags("uncordoned"),
+		PrintFlags: genericclioptions.NewPrintFlags("uncordoned").WithTypeSetter(scheme.Scheme),
 		IOStreams:  ioStreams,
 	}
 
@@ -195,7 +196,7 @@ var (
 
 func NewDrainOptions(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *DrainOptions {
 	return &DrainOptions{
-		PrintFlags: printers.NewPrintFlags("drained"),
+		PrintFlags: genericclioptions.NewPrintFlags("drained").WithTypeSetter(scheme.Scheme),
 
 		IOStreams:          ioStreams,
 		backOff:            clockwork.NewRealClock(),
@@ -263,7 +264,7 @@ func (o *DrainOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 
 	o.nodeInfos = []*resource.Info{}
 
-	o.Namespace, _, err = f.DefaultNamespace()
+	o.Namespace, _, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -278,6 +279,7 @@ func (o *DrainOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 		if err != nil {
 			return nil, err
 		}
+
 		return printer.PrintObj, nil
 	}
 
@@ -318,7 +320,7 @@ func (o *DrainOptions) RunDrain() error {
 		return err
 	}
 
-	printer, err := o.ToPrinter("drained")
+	printObj, err := o.ToPrinter("drained")
 	if err != nil {
 		return err
 	}
@@ -333,7 +335,7 @@ func (o *DrainOptions) RunDrain() error {
 		}
 		if err == nil || o.DryRun {
 			drainedNodes.Insert(info.Name)
-			printer.PrintObj(info.Object, o.Out)
+			printObj(info.Object, o.Out)
 		} else {
 			fmt.Fprintf(o.ErrOut, "error: unable to drain node %q, aborting command...\n\n", info.Name)
 			remainingNodes := []string{}
@@ -571,37 +573,39 @@ func (o *DrainOptions) deleteOrEvictPods(pods []corev1.Pod) error {
 }
 
 func (o *DrainOptions) evictPods(pods []corev1.Pod, policyGroupVersion string, getPodFn func(namespace, name string) (*corev1.Pod, error)) error {
-	doneCh := make(chan bool, len(pods))
-	errCh := make(chan error, 1)
+	returnCh := make(chan error, 1)
 
 	for _, pod := range pods {
-		go func(pod corev1.Pod, doneCh chan bool, errCh chan error) {
+		go func(pod corev1.Pod, returnCh chan error) {
 			var err error
 			for {
 				err = o.evictPod(pod, policyGroupVersion)
 				if err == nil {
 					break
 				} else if apierrors.IsNotFound(err) {
-					doneCh <- true
+					returnCh <- nil
 					return
 				} else if apierrors.IsTooManyRequests(err) {
+					fmt.Fprintf(o.ErrOut, "error when evicting pod %q (will retry after 5s): %v\n", pod.Name, err)
 					time.Sleep(5 * time.Second)
 				} else {
-					errCh <- fmt.Errorf("error when evicting pod %q: %v", pod.Name, err)
+					returnCh <- fmt.Errorf("error when evicting pod %q: %v", pod.Name, err)
 					return
 				}
 			}
 			podArray := []corev1.Pod{pod}
-			_, err = o.waitForDelete(podArray, kubectl.Interval, time.Duration(math.MaxInt64), true, getPodFn)
+			_, err = o.waitForDelete(podArray, 1*time.Second, time.Duration(math.MaxInt64), true, getPodFn)
 			if err == nil {
-				doneCh <- true
+				returnCh <- nil
 			} else {
-				errCh <- fmt.Errorf("error when waiting for pod %q terminating: %v", pod.Name, err)
+				returnCh <- fmt.Errorf("error when waiting for pod %q terminating: %v", pod.Name, err)
 			}
-		}(pod, doneCh, errCh)
+		}(pod, returnCh)
 	}
 
 	doneCount := 0
+	var errors []error
+
 	// 0 timeout means infinite, we use MaxInt64 to represent it.
 	var globalTimeout time.Duration
 	if o.Timeout == 0 {
@@ -609,19 +613,20 @@ func (o *DrainOptions) evictPods(pods []corev1.Pod, policyGroupVersion string, g
 	} else {
 		globalTimeout = o.Timeout
 	}
-	for {
+	globalTimeoutCh := time.After(globalTimeout)
+	numPods := len(pods)
+	for doneCount < numPods {
 		select {
-		case err := <-errCh:
-			return err
-		case <-doneCh:
+		case err := <-returnCh:
 			doneCount++
-			if doneCount == len(pods) {
-				return nil
+			if err != nil {
+				errors = append(errors, err)
 			}
-		case <-time.After(globalTimeout):
+		case <-globalTimeoutCh:
 			return fmt.Errorf("Drain did not complete within %v", globalTimeout)
 		}
 	}
+	return utilerrors.NewAggregate(errors)
 }
 
 func (o *DrainOptions) deletePods(pods []corev1.Pod, getPodFn func(namespace, name string) (*corev1.Pod, error)) error {
@@ -638,7 +643,7 @@ func (o *DrainOptions) deletePods(pods []corev1.Pod, getPodFn func(namespace, na
 			return err
 		}
 	}
-	_, err := o.waitForDelete(pods, kubectl.Interval, globalTimeout, false, getPodFn)
+	_, err := o.waitForDelete(pods, 1*time.Second, globalTimeout, false, getPodFn)
 	return err
 }
 
@@ -649,7 +654,7 @@ func (o *DrainOptions) waitForDelete(pods []corev1.Pod, interval, timeout time.D
 	} else {
 		verbStr = "deleted"
 	}
-	printer, err := o.ToPrinter(verbStr)
+	printObj, err := o.ToPrinter(verbStr)
 	if err != nil {
 		return pods, err
 	}
@@ -659,7 +664,7 @@ func (o *DrainOptions) waitForDelete(pods []corev1.Pod, interval, timeout time.D
 		for i, pod := range pods {
 			p, err := getPodFn(pod.Namespace, pod.Name)
 			if apierrors.IsNotFound(err) || (p != nil && p.ObjectMeta.UID != pod.ObjectMeta.UID) {
-				printer.PrintObj(&pod, o.Out)
+				printObj(&pod, o.Out)
 				continue
 			} else if err != nil {
 				return false, err
@@ -735,12 +740,12 @@ func (o *DrainOptions) RunCordonOrUncordon(desired bool) error {
 			}
 			unsched := node.Spec.Unschedulable
 			if unsched == desired {
-				printer, err := o.ToPrinter(already(desired))
+				printObj, err := o.ToPrinter(already(desired))
 				if err != nil {
 					fmt.Printf("error: %v", err)
 					continue
 				}
-				printer.PrintObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
+				printObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
 			} else {
 				if !o.DryRun {
 					helper := resource.NewHelper(o.restClient, nodeInfo.Mapping)
@@ -761,20 +766,20 @@ func (o *DrainOptions) RunCordonOrUncordon(desired bool) error {
 						continue
 					}
 				}
-				printer, err := o.ToPrinter(changed(desired))
+				printObj, err := o.ToPrinter(changed(desired))
 				if err != nil {
 					fmt.Fprintf(o.ErrOut, "%v", err)
 					continue
 				}
-				printer.PrintObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
+				printObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
 			}
 		} else {
-			printer, err := o.ToPrinter("skipped")
+			printObj, err := o.ToPrinter("skipped")
 			if err != nil {
 				fmt.Fprintf(o.ErrOut, "%v", err)
 				continue
 			}
-			printer.PrintObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
+			printObj(cmdutil.AsDefaultVersionedOrOriginal(nodeInfo.Object, nodeInfo.Mapping), o.Out)
 		}
 	}
 

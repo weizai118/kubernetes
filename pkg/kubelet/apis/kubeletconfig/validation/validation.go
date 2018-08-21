@@ -31,6 +31,11 @@ import (
 func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration) error {
 	allErrors := []error{}
 
+	// Make a local copy of the global feature gates and combine it with the gates set by this configuration.
+	// This allows us to validate the config against the set of gates it will actually run against.
+	localFeatureGate := utilfeature.DefaultFeatureGate.DeepCopy()
+	localFeatureGate.SetFromMap(kc.FeatureGates)
+
 	if !kc.CgroupsPerQOS && len(kc.EnforceNodeAllocatable) > 0 {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: EnforceNodeAllocatable (--enforce-node-allocatable) is not supported unless CgroupsPerQOS (--cgroups-per-qos) feature is turned on"))
 	}
@@ -51,6 +56,9 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration) error 
 	}
 	if utilvalidation.IsInRange(int(kc.ImageGCLowThresholdPercent), 0, 100) != nil {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: ImageGCLowThresholdPercent (--image-gc-low-threshold) %v must be between 0 and 100, inclusive", kc.ImageGCLowThresholdPercent))
+	}
+	if kc.ImageGCLowThresholdPercent >= kc.ImageGCHighThresholdPercent {
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: ImageGCLowThresholdPercent (--image-gc-low-threshold) %v must be less than ImageGCHighThresholdPercent (--image-gc-high-threshold) %v", kc.ImageGCLowThresholdPercent, kc.ImageGCHighThresholdPercent))
 	}
 	if utilvalidation.IsInRange(int(kc.IPTablesDropBit), 0, 31) != nil {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: IPTablesDropBit (--iptables-drop-bit) %v must be between 0 and 31, inclusive", kc.IPTablesDropBit))
@@ -88,7 +96,10 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration) error 
 	if kc.RegistryPullQPS < 0 {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: RegistryPullQPS (--registry-qps) %v must not be a negative number", kc.RegistryPullQPS))
 	}
-	if kc.ServerTLSBootstrap && !utilfeature.DefaultFeatureGate.Enabled(features.RotateKubeletServerCertificate) {
+	if kc.RotateCertificates && !localFeatureGate.Enabled(features.RotateKubeletClientCertificate) {
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: RotateCertificates %v requires feature gate RotateKubeletClientCertificate", kc.RotateCertificates))
+	}
+	if kc.ServerTLSBootstrap && !localFeatureGate.Enabled(features.RotateKubeletServerCertificate) {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: ServerTLSBootstrap %v requires feature gate RotateKubeletServerCertificate", kc.ServerTLSBootstrap))
 	}
 	for _, val := range kc.EnforceNodeAllocatable {
@@ -102,7 +113,7 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration) error 
 			}
 		default:
 			allErrors = append(allErrors, fmt.Errorf("invalid configuration: option %q specified for EnforceNodeAllocatable (--enforce-node-allocatable). Valid options are %q, %q, %q, or %q",
-				val, kubetypes.NodeAllocatableEnforcementKey, kubetypes.SystemReservedEnforcementKey, kubetypes.KubeReservedEnforcementKey, kubetypes.NodeAllocatableEnforcementKey))
+				val, kubetypes.NodeAllocatableEnforcementKey, kubetypes.SystemReservedEnforcementKey, kubetypes.KubeReservedEnforcementKey, kubetypes.NodeAllocatableNoneKey))
 		}
 	}
 	switch kc.HairpinMode {
@@ -112,6 +123,10 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration) error 
 	default:
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: option %q specified for HairpinMode (--hairpin-mode). Valid options are %q, %q or %q",
 			kc.HairpinMode, kubeletconfig.HairpinNone, kubeletconfig.HairpinVeth, kubeletconfig.PromiscuousBridge))
+	}
+
+	if err := validateKubeletOSConfiguration(kc); err != nil {
+		allErrors = append(allErrors, err)
 	}
 	return utilerrors.NewAggregate(allErrors)
 }

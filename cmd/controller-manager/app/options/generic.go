@@ -18,7 +18,9 @@ package options
 
 import (
 	"github.com/spf13/pflag"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiserverconfig "k8s.io/apiserver/pkg/apis/config"
 	"k8s.io/kubernetes/pkg/apis/componentconfig"
 	"k8s.io/kubernetes/pkg/client/leaderelectionconfig"
 )
@@ -30,7 +32,23 @@ type GenericComponentConfigOptions struct {
 	KubeAPIQPS              float32
 	KubeAPIBurst            int32
 	ControllerStartInterval metav1.Duration
-	LeaderElection          componentconfig.LeaderElectionConfiguration
+	LeaderElection          apiserverconfig.LeaderElectionConfiguration
+}
+
+// NewGenericComponentConfigOptions returns generic configuration default values for both
+// the kube-controller-manager and the cloud-contoller-manager. Any common changes should
+// be made here. Any individual changes should be made in that controller.
+func NewGenericComponentConfigOptions(cfg componentconfig.GenericComponentConfiguration) *GenericComponentConfigOptions {
+	o := &GenericComponentConfigOptions{
+		MinResyncPeriod:         cfg.MinResyncPeriod,
+		ContentType:             cfg.ContentType,
+		KubeAPIQPS:              cfg.KubeAPIQPS,
+		KubeAPIBurst:            cfg.KubeAPIBurst,
+		ControllerStartInterval: cfg.ControllerStartInterval,
+		LeaderElection:          cfg.LeaderElection,
+	}
+
+	return o
 }
 
 // AddFlags adds flags related to generic for controller manager to the specified FlagSet.

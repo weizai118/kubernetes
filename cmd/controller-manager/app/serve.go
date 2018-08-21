@@ -22,8 +22,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	apiserverconfig "k8s.io/apiserver/pkg/apis/config"
 	genericapifilters "k8s.io/apiserver/pkg/endpoints/filters"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	apiserver "k8s.io/apiserver/pkg/server"
 	genericfilters "k8s.io/apiserver/pkg/server/filters"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
@@ -33,12 +35,12 @@ import (
 )
 
 // BuildHandlerChain builds a handler chain with a base handler and CompletedConfig.
-func BuildHandlerChain(apiHandler http.Handler, c *CompletedConfig) http.Handler {
+func BuildHandlerChain(apiHandler http.Handler, authorizationInfo *apiserver.AuthorizationInfo, authenticationInfo *apiserver.AuthenticationInfo) http.Handler {
 	requestInfoResolver := &apirequest.RequestInfoFactory{}
 	failedHandler := genericapifilters.Unauthorized(legacyscheme.Codecs, false)
 
-	handler := genericapifilters.WithAuthorization(apiHandler, c.Authorization.Authorizer, legacyscheme.Codecs)
-	handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler)
+	handler := genericapifilters.WithAuthorization(apiHandler, authorizationInfo.Authorizer, legacyscheme.Codecs)
+	handler = genericapifilters.WithAuthentication(handler, authenticationInfo.Authenticator, failedHandler)
 	handler = genericapifilters.WithRequestInfo(handler, requestInfoResolver)
 	handler = genericfilters.WithPanicRecovery(handler)
 
@@ -46,12 +48,12 @@ func BuildHandlerChain(apiHandler http.Handler, c *CompletedConfig) http.Handler
 }
 
 // NewBaseHandler takes in CompletedConfig and returns a handler.
-func NewBaseHandler(c *CompletedConfig) http.Handler {
+func NewBaseHandler(c *apiserverconfig.DebuggingConfiguration) *mux.PathRecorderMux {
 	mux := mux.NewPathRecorderMux("controller-manager")
 	healthz.InstallHandler(mux)
-	if c.ComponentConfig.Debugging.EnableProfiling {
+	if c.EnableProfiling {
 		routes.Profiling{}.Install(mux)
-		if c.ComponentConfig.Debugging.EnableContentionProfiling {
+		if c.EnableContentionProfiling {
 			goruntime.SetBlockProfileRate(1)
 		}
 	}

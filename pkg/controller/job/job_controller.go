@@ -48,6 +48,8 @@ import (
 	"github.com/golang/glog"
 )
 
+const statusUpdateRetries = 3
+
 // controllerKind contains the schema.GroupVersionKind for this controller type.
 var controllerKind = batch.SchemeGroupVersion.WithKind("Job")
 
@@ -356,10 +358,10 @@ func (jm *JobController) enqueueController(obj interface{}, immediate bool) {
 		return
 	}
 
-	if immediate {
-		jm.queue.Forget(key)
+	backoff := time.Duration(0)
+	if !immediate {
+		backoff = getBackoff(jm.queue, key)
 	}
-	backoff := getBackoff(jm.queue, key)
 
 	// TODO: Handle overlapping controllers better. Either disallow them at admission time or
 	// deterministically avoid syncing controllers that fight over pods. Currently, we only
@@ -434,7 +436,7 @@ func (jm *JobController) getPodsForJob(j *batch.Job) ([]*v1.Pod, error) {
 func (jm *JobController) syncJob(key string) (bool, error) {
 	startTime := time.Now()
 	defer func() {
-		glog.V(4).Infof("Finished syncing job %q (%v)", key, time.Now().Sub(startTime))
+		glog.V(4).Infof("Finished syncing job %q (%v)", key, time.Since(startTime))
 	}()
 
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
@@ -495,7 +497,11 @@ func (jm *JobController) syncJob(key string) (bool, error) {
 	var failureMessage string
 
 	jobHaveNewFailure := failed > job.Status.Failed
-	exceedsBackoffLimit := jobHaveNewFailure && (int32(previousRetry)+1 > *job.Spec.BackoffLimit)
+	// new failures happen when status does not reflect the failures and active
+	// is different than parallelism, otherwise the previous controller loop
+	// failed updating status so even if we pick up failure it is not a new one
+	exceedsBackoffLimit := jobHaveNewFailure && (active != *job.Spec.Parallelism) &&
+		(int32(previousRetry)+1 > *job.Spec.BackoffLimit)
 
 	if exceedsBackoffLimit || pastBackoffLimitOnFailure(&job, pods) {
 		// check if the number of pod restart exceeds backoff (for restart OnFailure only)
@@ -813,7 +819,20 @@ func (jm *JobController) manageJob(activePods []*v1.Pod, succeeded int32, job *b
 }
 
 func (jm *JobController) updateJobStatus(job *batch.Job) error {
-	_, err := jm.kubeClient.BatchV1().Jobs(job.Namespace).UpdateStatus(job)
+	jobClient := jm.kubeClient.BatchV1().Jobs(job.Namespace)
+	var err error
+	for i := 0; i <= statusUpdateRetries; i = i + 1 {
+		var newJob *batch.Job
+		newJob, err = jobClient.Get(job.Name, metav1.GetOptions{})
+		if err != nil {
+			break
+		}
+		newJob.Status = job.Status
+		if _, err = jobClient.UpdateStatus(newJob); err == nil {
+			break
+		}
+	}
+
 	return err
 }
 
@@ -846,17 +865,4 @@ func filterPods(pods []*v1.Pod, phase v1.PodPhase) int {
 		}
 	}
 	return result
-}
-
-// byCreationTimestamp sorts a list by creation timestamp, using their names as a tie breaker.
-type byCreationTimestamp []batch.Job
-
-func (o byCreationTimestamp) Len() int      { return len(o) }
-func (o byCreationTimestamp) Swap(i, j int) { o[i], o[j] = o[j], o[i] }
-
-func (o byCreationTimestamp) Less(i, j int) bool {
-	if o[i].CreationTimestamp.Equal(&o[j].CreationTimestamp) {
-		return o[i].Name < o[j].Name
-	}
-	return o[i].CreationTimestamp.Before(&o[j].CreationTimestamp)
 }

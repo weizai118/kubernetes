@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2017-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2017-09-01/network"
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2017-10-01/storage"
 	"github.com/Azure/go-autorest/autorest"
@@ -826,7 +826,7 @@ func (fDC *fakeDisksClient) Get(ctx context.Context, resourceGroupName string, d
 }
 
 type fakeVMSet struct {
-	NodeToIP map[string]map[string]string
+	NodeToIP map[string]string
 	Err      error
 }
 
@@ -838,19 +838,16 @@ func (f *fakeVMSet) GetInstanceTypeByNodeName(name string) (string, error) {
 	return "", fmt.Errorf("unimplemented")
 }
 
-func (f *fakeVMSet) GetIPByNodeName(name, vmSetName string) (string, string, error) {
-	nodes, found := f.NodeToIP[vmSetName]
+func (f *fakeVMSet) GetIPByNodeName(name string) (string, string, error) {
+	ip, found := f.NodeToIP[name]
 	if !found {
 		return "", "", fmt.Errorf("not found")
 	}
-	ip, found := nodes[name]
-	if !found {
-		return "", "", fmt.Errorf("not found")
-	}
+
 	return ip, "", nil
 }
 
-func (f *fakeVMSet) GetPrimaryInterface(nodeName, vmSetName string) (network.Interface, error) {
+func (f *fakeVMSet) GetPrimaryInterface(nodeName string) (network.Interface, error) {
 	return network.Interface{}, fmt.Errorf("unimplemented")
 }
 

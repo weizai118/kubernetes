@@ -45,11 +45,11 @@ import (
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubectl"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/util/editor/crlf"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
-	"k8s.io/kubernetes/pkg/kubectl/util/crlf"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 // EditOptions contains all the options for running edit cli command.
@@ -57,10 +57,9 @@ type EditOptions struct {
 	resource.FilenameOptions
 	RecordFlags *genericclioptions.RecordFlags
 
-	PrintFlags *printers.PrintFlags
-	ToPrinter  func(string) (printers.ResourcePrinterFunc, error)
+	PrintFlags *genericclioptions.PrintFlags
+	ToPrinter  func(string) (printers.ResourcePrinter, error)
 
-	Output             string
 	OutputPatch        bool
 	WindowsLineEndings bool
 
@@ -88,28 +87,70 @@ func NewEditOptions(editMode EditMode, ioStreams genericclioptions.IOStreams) *E
 
 		EditMode: editMode,
 
-		PrintFlags: printers.NewPrintFlags("edited"),
+		PrintFlags: genericclioptions.NewPrintFlags("edited").WithTypeSetter(scheme.Scheme),
+
+		editPrinterOptions: &editPrinterOptions{
+			// create new editor-specific PrintFlags, with all
+			// output flags disabled, except json / yaml
+			printFlags: (&genericclioptions.PrintFlags{
+				JSONYamlPrintFlags: genericclioptions.NewJSONYamlPrintFlags(),
+			}).WithDefaultOutput("yaml"),
+			ext:       ".yaml",
+			addHeader: true,
+		},
 
 		WindowsLineEndings: goruntime.GOOS == "windows",
 
 		Recorder: genericclioptions.NoopRecorder{},
 
 		IOStreams: ioStreams,
-		Output:    "yaml",
 	}
 }
 
 type editPrinterOptions struct {
-	printer   printers.ResourcePrinter
-	ext       string
-	addHeader bool
+	printFlags *genericclioptions.PrintFlags
+	ext        string
+	addHeader  bool
+}
+
+func (e *editPrinterOptions) Complete(fromPrintFlags *genericclioptions.PrintFlags) error {
+	if e.printFlags == nil {
+		return fmt.Errorf("missing PrintFlags in editor printer options")
+	}
+
+	// bind output format from existing printflags
+	if fromPrintFlags != nil && len(*fromPrintFlags.OutputFormat) > 0 {
+		e.printFlags.OutputFormat = fromPrintFlags.OutputFormat
+	}
+
+	// prevent a commented header at the top of the user's
+	// default editor if presenting contents as json.
+	if *e.printFlags.OutputFormat == "json" {
+		e.addHeader = false
+		e.ext = ".json"
+		return nil
+	}
+
+	// we default to yaml if check above is false, as only json or yaml are supported
+	e.addHeader = true
+	e.ext = ".yaml"
+	return nil
+}
+
+func (e *editPrinterOptions) PrintObj(obj runtime.Object, out io.Writer) error {
+	p, err := e.printFlags.ToPrinter()
+	if err != nil {
+		return err
+	}
+
+	return p.PrintObj(obj, out)
 }
 
 // Complete completes all the required options
 func (o *EditOptions) Complete(f cmdutil.Factory, args []string, cmd *cobra.Command) error {
 	var err error
 
-	o.RecordFlags.Complete(f.Command(cmd, false))
+	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
 	if err != nil {
 		return err
@@ -118,18 +159,14 @@ func (o *EditOptions) Complete(f cmdutil.Factory, args []string, cmd *cobra.Comm
 	if o.EditMode != NormalEditMode && o.EditMode != EditBeforeCreateMode && o.EditMode != ApplyEditMode {
 		return fmt.Errorf("unsupported edit mode %q", o.EditMode)
 	}
-	if o.Output != "" {
-		if o.Output != "yaml" && o.Output != "json" {
-			return fmt.Errorf("invalid output format %s, only yaml|json supported", o.Output)
-		}
-	}
-	o.editPrinterOptions = getPrinter(o.Output)
+
+	o.editPrinterOptions.Complete(o.PrintFlags)
 
 	if o.OutputPatch && o.EditMode != NormalEditMode {
 		return fmt.Errorf("the edit mode doesn't support output the patch")
 	}
 
-	cmdNamespace, enforceNamespace, err := f.DefaultNamespace()
+	cmdNamespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -163,13 +200,9 @@ func (o *EditOptions) Complete(f cmdutil.Factory, args []string, cmd *cobra.Comm
 			Do()
 	}
 
-	o.ToPrinter = func(operation string) (printers.ResourcePrinterFunc, error) {
+	o.ToPrinter = func(operation string) (printers.ResourcePrinter, error) {
 		o.PrintFlags.NamePrintFlags.Operation = operation
-		printer, err := o.PrintFlags.ToPrinter()
-		if err != nil {
-			return nil, err
-		}
-		return printer.PrintObj, nil
+		return o.PrintFlags.ToPrinter()
 	}
 
 	o.CmdNamespace = cmdNamespace
@@ -184,7 +217,7 @@ func (o *EditOptions) Validate() error {
 }
 
 func (o *EditOptions) Run() error {
-	edit := NewDefaultEditor(o.f.EditorEnvs())
+	edit := NewDefaultEditor(editorEnvs())
 	// editFn is invoked for each edit session (once with a list for normal edit, once for each individual resource in a edit-on-create invocation)
 	editFn := func(infos []*resource.Info) error {
 		var (
@@ -229,7 +262,7 @@ func (o *EditOptions) Run() error {
 			}
 
 			if !containsError {
-				if err := o.editPrinterOptions.printer.PrintObj(originalObj, w); err != nil {
+				if err := o.editPrinterOptions.PrintObj(originalObj, w); err != nil {
 					return preservedFile(err, results.file, o.ErrOut)
 				}
 				original = buf.Bytes()
@@ -513,30 +546,6 @@ func encodeToJson(obj runtime.Unstructured) ([]byte, error) {
 	return js, nil
 }
 
-func getPrinter(format string) *editPrinterOptions {
-	switch format {
-	case "json":
-		return &editPrinterOptions{
-			printer:   &printers.JSONPrinter{},
-			ext:       ".json",
-			addHeader: false,
-		}
-	case "yaml":
-		return &editPrinterOptions{
-			printer:   &printers.YAMLPrinter{},
-			ext:       ".yaml",
-			addHeader: true,
-		}
-	default:
-		// if format is not specified, use yaml as default
-		return &editPrinterOptions{
-			printer:   &printers.YAMLPrinter{},
-			ext:       ".yaml",
-			addHeader: true,
-		}
-	}
-}
-
 func (o *EditOptions) visitToPatch(originalInfos []*resource.Info, patchVisitor resource.Visitor, results *editResults) error {
 	err := patchVisitor.Visit(func(info *resource.Info, incomingErr error) error {
 		editObjUID, err := meta.NewAccessor().UID(info.Object)
@@ -809,4 +818,12 @@ func hashOnLineBreak(s string) string {
 		}
 	}
 	return r
+}
+
+// editorEnvs returns an ordered list of env vars to check for editor preferences.
+func editorEnvs() []string {
+	return []string{
+		"KUBE_EDITOR",
+		"EDITOR",
+	}
 }

@@ -21,7 +21,10 @@ import (
 	"testing"
 
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/kubernetes/pkg/util/version"
 )
+
+var TestMinVersion = version.MustParseSemantic("v1.10.0-alpha.1")
 
 func TestKnownFeatures(t *testing.T) {
 	var someFeatures = FeatureList{
@@ -121,7 +124,7 @@ func TestNewFeatureGate(t *testing.T) {
 func TestValidateVersion(t *testing.T) {
 	var someFeatures = FeatureList{
 		"feature1": {FeatureSpec: utilfeature.FeatureSpec{Default: false, PreRelease: utilfeature.Beta}},
-		"feature2": {FeatureSpec: utilfeature.FeatureSpec{Default: true, PreRelease: utilfeature.Alpha}, MinimumVersion: v190},
+		"feature2": {FeatureSpec: utilfeature.FeatureSpec{Default: true, PreRelease: utilfeature.Alpha}, MinimumVersion: TestMinVersion},
 	}
 
 	var tests = []struct {
@@ -135,12 +138,12 @@ func TestValidateVersion(t *testing.T) {
 		},
 		{ //min version but correct value given
 			requestedFeatures: map[string]bool{"feature2": true},
-			requestedVersion:  "v1.9.0",
+			requestedVersion:  "v1.10.0",
 			expectedError:     false,
 		},
 		{ //min version and incorrect value given
 			requestedFeatures: map[string]bool{"feature2": true},
-			requestedVersion:  "v1.8.2",
+			requestedVersion:  "v1.9.2",
 			expectedError:     true,
 		},
 	}
@@ -168,8 +171,8 @@ func TestResolveFeatureGateDependencies(t *testing.T) {
 			expectedFeatures: map[string]bool{},
 		},
 		{ // others flags
-			inputFeatures:    map[string]bool{CoreDNS: true},
-			expectedFeatures: map[string]bool{CoreDNS: true},
+			inputFeatures:    map[string]bool{CoreDNS: false},
+			expectedFeatures: map[string]bool{CoreDNS: false},
 		},
 		{ // just StoreCertsInSecrets flags
 			inputFeatures:    map[string]bool{StoreCertsInSecrets: true},
@@ -186,6 +189,19 @@ func TestResolveFeatureGateDependencies(t *testing.T) {
 		if !reflect.DeepEqual(test.inputFeatures, test.expectedFeatures) {
 			t.Errorf("ResolveFeatureGateDependencies failed, expected: %v, got: %v", test.inputFeatures, test.expectedFeatures)
 
+		}
+	}
+}
+
+// TestEnabledDefaults tests that Enabled returns the default values for
+// each feature gate when no feature gates are specified.
+func TestEnabledDefaults(t *testing.T) {
+	for featureName, feature := range InitFeatureGates {
+		featureList := make(map[string]bool)
+
+		enabled := Enabled(featureList, featureName)
+		if enabled != feature.Default {
+			t.Errorf("Enabled returned %v instead of default value %v for feature %s", enabled, feature.Default, featureName)
 		}
 	}
 }

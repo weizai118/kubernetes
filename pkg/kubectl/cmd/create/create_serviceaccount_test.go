@@ -23,7 +23,6 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
@@ -32,11 +31,11 @@ import (
 func TestCreateServiceAccount(t *testing.T) {
 	serviceAccountObject := &v1.ServiceAccount{}
 	serviceAccountObject.Name = "my-service-account"
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
-	ns := legacyscheme.Codecs
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+	ns := scheme.Codecs
 
 	tf.Client = &fake.RESTClient{
 		GroupVersion:         schema.GroupVersion{Version: "v1"},
@@ -51,7 +50,6 @@ func TestCreateServiceAccount(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()
 	cmd := NewCmdCreateServiceAccount(tf, ioStreams)
 	cmd.Flags().Set("output", "name")

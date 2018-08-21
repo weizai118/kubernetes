@@ -36,10 +36,10 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 var patchTypes = map[string]types.PatchType{"json": types.JSONPatchType, "merge": types.MergePatchType, "strategic": types.StrategicMergePatchType}
@@ -50,8 +50,8 @@ type PatchOptions struct {
 	resource.FilenameOptions
 
 	RecordFlags *genericclioptions.RecordFlags
-	PrintFlags  *printers.PrintFlags
-	ToPrinter   func(string) (printers.ResourcePrinterFunc, error)
+	PrintFlags  *genericclioptions.PrintFlags
+	ToPrinter   func(string) (printers.ResourcePrinter, error)
 	Recorder    genericclioptions.Recorder
 
 	Local     bool
@@ -98,7 +98,7 @@ func NewPatchOptions(ioStreams genericclioptions.IOStreams) *PatchOptions {
 	return &PatchOptions{
 		RecordFlags: genericclioptions.NewRecordFlags(),
 		Recorder:    genericclioptions.NoopRecorder{},
-		PrintFlags:  printers.NewPrintFlags("patched"),
+		PrintFlags:  genericclioptions.NewPrintFlags("patched").WithTypeSetter(scheme.Scheme),
 		IOStreams:   ioStreams,
 	}
 }
@@ -134,7 +134,7 @@ func NewCmdPatch(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobr
 
 func (o *PatchOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	var err error
-	o.RecordFlags.Complete(f.Command(cmd, false))
+	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
 	if err != nil {
 		return err
@@ -143,20 +143,16 @@ func (o *PatchOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	o.outputFormat = cmdutil.GetFlagString(cmd, "output")
 	o.dryRun = cmdutil.GetFlagBool(cmd, "dry-run")
 
-	o.ToPrinter = func(operation string) (printers.ResourcePrinterFunc, error) {
+	o.ToPrinter = func(operation string) (printers.ResourcePrinter, error) {
 		o.PrintFlags.NamePrintFlags.Operation = operation
 		if o.dryRun {
 			o.PrintFlags.Complete("%s (dry run)")
 		}
 
-		printer, err := o.PrintFlags.ToPrinter()
-		if err != nil {
-			return nil, err
-		}
-		return printer.PrintObj, nil
+		return o.PrintFlags.ToPrinter()
 	}
 
-	o.namespace, o.enforceNamespace, err = f.DefaultNamespace()
+	o.namespace, o.enforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -197,6 +193,7 @@ func (o *PatchOptions) RunPatch() error {
 	r := o.builder.
 		Unstructured().
 		ContinueOnError().
+		LocalParam(o.Local).
 		NamespaceParam(o.namespace).DefaultNamespace().
 		FilenameParam(o.enforceNamespace, &o.FilenameOptions).
 		ResourceTypeOrNameArgs(false, o.args...).
@@ -212,14 +209,16 @@ func (o *PatchOptions) RunPatch() error {
 		if err != nil {
 			return err
 		}
+		count++
 		name, namespace := info.Name, info.Namespace
-		mapping := info.ResourceMapping()
-		client, err := o.unstructuredClientForMapping(mapping)
-		if err != nil {
-			return err
-		}
 
 		if !o.Local && !o.dryRun {
+			mapping := info.ResourceMapping()
+			client, err := o.unstructuredClientForMapping(mapping)
+			if err != nil {
+				return err
+			}
+
 			helper := resource.NewHelper(client, mapping)
 			patchedObj, err := helper.Patch(namespace, name, patchType, patchBytes)
 			if err != nil {
@@ -238,35 +237,20 @@ func (o *PatchOptions) RunPatch() error {
 					patchedObj = recordedObj
 				}
 			}
-			count++
-
-			// After computing whether we changed data, refresh the resource info with the resulting object
-			if err := info.Refresh(patchedObj, true); err != nil {
-				return err
-			}
 
 			printer, err := o.ToPrinter(patchOperation(didPatch))
 			if err != nil {
 				return err
 			}
-			printer.PrintObj(info.Object, o.Out)
-
-			// if object was not successfully patched, exit with error code 1
-			if !didPatch {
-				return cmdutil.ErrExit
-			}
-
-			return nil
+			return printer.PrintObj(patchedObj, o.Out)
 		}
-
-		count++
 
 		originalObjJS, err := runtime.Encode(unstructured.UnstructuredJSONScheme, info.Object)
 		if err != nil {
 			return err
 		}
 
-		originalPatchedObjJS, err := getPatchedJSON(patchType, originalObjJS, patchBytes, mapping.GroupVersionKind, scheme.Scheme)
+		originalPatchedObjJS, err := getPatchedJSON(patchType, originalObjJS, patchBytes, info.Object.GetObjectKind().GroupVersionKind(), scheme.Scheme)
 		if err != nil {
 			return err
 		}
@@ -277,22 +261,11 @@ func (o *PatchOptions) RunPatch() error {
 		}
 
 		didPatch := !reflect.DeepEqual(info.Object, targetObj)
-
-		// TODO: if we ever want to go generic, this allows a clean -o yaml without trying to print columns or anything
-		// rawExtension := &runtime.Unknown{
-		//	Raw: originalPatchedObjJS,
-		// }
-		if didPatch {
-			if err := info.Refresh(targetObj, true); err != nil {
-				return err
-			}
-		}
-
 		printer, err := o.ToPrinter(patchOperation(didPatch))
 		if err != nil {
 			return err
 		}
-		return printer.PrintObj(info.Object, o.Out)
+		return printer.PrintObj(targetObj, o.Out)
 	})
 	if err != nil {
 		return err
@@ -310,7 +283,15 @@ func getPatchedJSON(patchType types.PatchType, originalJS, patchJS []byte, gvk s
 		if err != nil {
 			return nil, err
 		}
-		return patchObj.Apply(originalJS)
+		bytes, err := patchObj.Apply(originalJS)
+		// TODO: This is pretty hacky, we need a better structured error from the json-patch
+		if err != nil && strings.Contains(err.Error(), "doc is missing key") {
+			msg := err.Error()
+			ix := strings.Index(msg, "key:")
+			key := msg[ix+5:]
+			return bytes, fmt.Errorf("Object to be patched is missing field (%s)", key)
+		}
+		return bytes, err
 
 	case types.MergePatchType:
 		return jsonpatch.MergePatch(originalJS, patchJS)
@@ -333,5 +314,5 @@ func patchOperation(didPatch bool) string {
 	if didPatch {
 		return "patched"
 	}
-	return "not patched"
+	return "patched (no change)"
 }

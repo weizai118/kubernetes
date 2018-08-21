@@ -40,7 +40,7 @@ import (
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 )
 
 type EditTestCase struct {
@@ -224,12 +224,8 @@ func TestEdit(t *testing.T) {
 					Client:               fake.CreateHTTPClient(reqResp),
 				}, nil
 			}
-
-			if len(testcase.Namespace) > 0 {
-				tf.Namespace = testcase.Namespace
-			}
+			tf.WithNamespace(testcase.Namespace)
 			tf.ClientConfigVal = defaultClientConfig()
-			tf.CommandVal = "edit test cmd invocation"
 			ioStreams, _, buf, errBuf := genericclioptions.NewTestIOStreams()
 
 			var cmd *cobra.Command

@@ -18,23 +18,22 @@ package set
 
 import (
 	"fmt"
-	"strings"
-
-	"k8s.io/kubernetes/pkg/printers"
-
-	"github.com/spf13/cobra"
-	"k8s.io/api/core/v1"
 
 	"github.com/golang/glog"
+	"github.com/spf13/cobra"
+
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/printers"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
+	"k8s.io/kubernetes/pkg/kubectl/polymorphichelpers"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
@@ -65,7 +64,7 @@ var (
 type SetResourcesOptions struct {
 	resource.FilenameOptions
 
-	PrintFlags  *printers.PrintFlags
+	PrintFlags  *genericclioptions.PrintFlags
 	RecordFlags *genericclioptions.RecordFlags
 
 	Infos             []*resource.Info
@@ -84,7 +83,7 @@ type SetResourcesOptions struct {
 	Requests             string
 	ResourceRequirements v1.ResourceRequirements
 
-	UpdatePodSpecForObject func(obj runtime.Object, fn func(*v1.PodSpec) error) (bool, error)
+	UpdatePodSpecForObject polymorphichelpers.UpdatePodSpecForObjectFunc
 	Resources              []string
 
 	genericclioptions.IOStreams
@@ -94,7 +93,7 @@ type SetResourcesOptions struct {
 // pod templates are selected by default.
 func NewResourcesOptions(streams genericclioptions.IOStreams) *SetResourcesOptions {
 	return &SetResourcesOptions{
-		PrintFlags:  printers.NewPrintFlags("resource requirements updated"),
+		PrintFlags:  genericclioptions.NewPrintFlags("resource requirements updated").WithTypeSetter(scheme.Scheme),
 		RecordFlags: genericclioptions.NewRecordFlags(),
 
 		Recorder: genericclioptions.NoopRecorder{},
@@ -108,16 +107,11 @@ func NewResourcesOptions(streams genericclioptions.IOStreams) *SetResourcesOptio
 func NewCmdResources(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewResourcesOptions(streams)
 
-	resourceTypesWithPodTemplate := []string{}
-	for _, resource := range f.SuggestedPodTemplateResources() {
-		resourceTypesWithPodTemplate = append(resourceTypesWithPodTemplate, resource.Resource)
-	}
-
 	cmd := &cobra.Command{
 		Use: "resources (-f FILENAME | TYPE NAME)  ([--limits=LIMITS & --requests=REQUESTS]",
 		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Update resource requests/limits on objects with pod templates"),
-		Long:    fmt.Sprintf(resources_long, strings.Join(resourceTypesWithPodTemplate, ", ")),
+		Long:    fmt.Sprintf(resources_long, cmdutil.SuggestApiResources("kubectl")),
 		Example: resources_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
@@ -147,13 +141,13 @@ func NewCmdResources(f cmdutil.Factory, streams genericclioptions.IOStreams) *co
 func (o *SetResourcesOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	var err error
 
-	o.RecordFlags.Complete(f.Command(cmd, false))
+	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
 	if err != nil {
 		return err
 	}
 
-	o.UpdatePodSpecForObject = f.UpdatePodSpecForObject
+	o.UpdatePodSpecForObject = polymorphichelpers.UpdatePodSpecForObjectFn
 	o.Output = cmdutil.GetFlagString(cmd, "output")
 	o.DryRun = cmdutil.GetDryRunFlag(cmd)
 
@@ -166,14 +160,14 @@ func (o *SetResourcesOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, ar
 	}
 	o.PrintObj = printer.PrintObj
 
-	cmdNamespace, enforceNamespace, err := f.DefaultNamespace()
+	cmdNamespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
 
 	includeUninitialized := cmdutil.ShouldIncludeUninitialized(cmd, false)
 	builder := f.NewBuilder().
-		WithScheme(legacyscheme.Scheme).
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		LocalParam(o.Local).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
@@ -222,10 +216,9 @@ func (o *SetResourcesOptions) Validate() error {
 
 func (o *SetResourcesOptions) Run() error {
 	allErrs := []error{}
-	patches := CalculatePatches(o.Infos, cmdutil.InternalVersionJSONEncoder(), func(info *resource.Info) ([]byte, error) {
+	patches := CalculatePatches(o.Infos, scheme.DefaultJSONEncoder(), func(obj runtime.Object) ([]byte, error) {
 		transformed := false
-		info.Object = cmdutil.AsDefaultVersionedOrOriginal(info.Object, info.Mapping)
-		_, err := o.UpdatePodSpecForObject(info.Object, func(spec *v1.PodSpec) error {
+		_, err := o.UpdatePodSpecForObject(obj, func(spec *v1.PodSpec) error {
 			containers, _ := selectContainers(spec.Containers, o.ContainerSelector)
 			if len(containers) != 0 {
 				for i := range containers {
@@ -256,11 +249,11 @@ func (o *SetResourcesOptions) Run() error {
 			return nil, nil
 		}
 		// record this change (for rollout history)
-		if err := o.Recorder.Record(info.Object); err != nil {
+		if err := o.Recorder.Record(obj); err != nil {
 			glog.V(4).Infof("error recording current command: %v", err)
 		}
 
-		return runtime.Encode(cmdutil.InternalVersionJSONEncoder(), info.Object)
+		return runtime.Encode(scheme.DefaultJSONEncoder(), obj)
 	})
 
 	for _, patch := range patches {
@@ -277,21 +270,20 @@ func (o *SetResourcesOptions) Run() error {
 		}
 
 		if o.Local || o.DryRun {
-			if err := o.PrintObj(cmdutil.AsDefaultVersionedOrOriginal(patch.Info.Object, patch.Info.Mapping), o.Out); err != nil {
-				return err
+			if err := o.PrintObj(info.Object, o.Out); err != nil {
+				allErrs = append(allErrs, err)
 			}
 			continue
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch)
+		actual, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch)
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("failed to patch limit update to pod template %v\n", err))
 			continue
 		}
-		info.Refresh(obj, true)
 
-		if err := o.PrintObj(cmdutil.AsDefaultVersionedOrOriginal(info.Object, info.Mapping), o.Out); err != nil {
-			return err
+		if err := o.PrintObj(actual, o.Out); err != nil {
+			allErrs = append(allErrs, err)
 		}
 	}
 	return utilerrors.NewAggregate(allErrs)

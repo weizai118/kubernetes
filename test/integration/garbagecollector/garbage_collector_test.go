@@ -27,7 +27,7 @@ import (
 	"k8s.io/api/core/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	apiextensionstestserver "k8s.io/apiextensions-apiserver/test/integration/testserver"
+	apiextensionstestserver "k8s.io/apiextensions-apiserver/test/integration/fixtures"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,11 +36,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/storage/names"
-	"k8s.io/client-go/discovery"
 	cacheddiscovery "k8s.io/client-go/discovery/cached"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/controller/garbagecollector"
@@ -168,14 +168,14 @@ func link(t *testing.T, owner, dependent metav1.Object) {
 
 func createRandomCustomResourceDefinition(
 	t *testing.T, apiExtensionClient apiextensionsclientset.Interface,
-	dynamicClient dynamic.DynamicInterface,
+	dynamicClient dynamic.Interface,
 	namespace string,
-) (*apiextensionsv1beta1.CustomResourceDefinition, dynamic.DynamicResourceInterface) {
+) (*apiextensionsv1beta1.CustomResourceDefinition, dynamic.ResourceInterface) {
 	// Create a random custom resource definition and ensure it's available for
 	// use.
 	definition := apiextensionstestserver.NewRandomNameCustomResourceDefinition(apiextensionsv1beta1.NamespaceScoped)
 
-	err := apiextensionstestserver.CreateNewCustomResourceDefinition(definition, apiExtensionClient, dynamicClient)
+	definition, err := apiextensionstestserver.CreateNewCustomResourceDefinition(definition, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatalf("failed to create CustomResourceDefinition: %v", err)
 	}
@@ -193,7 +193,7 @@ type testContext struct {
 	gc                 *garbagecollector.GarbageCollector
 	clientSet          clientset.Interface
 	apiExtensionClient apiextensionsclientset.Interface
-	dynamicClient      dynamic.DynamicInterface
+	dynamicClient      dynamic.Interface
 	startGC            func(workers int)
 	// syncPeriod is how often the GC started with startGC will be resynced.
 	syncPeriod time.Duration
@@ -220,13 +220,10 @@ func setupWithServer(t *testing.T, result *kubeapiservertesting.TestServer, work
 	createNamespaceOrDie("aval", clientSet, t)
 
 	discoveryClient := cacheddiscovery.NewMemCacheClient(clientSet.Discovery())
-	restMapper := discovery.NewDeferredDiscoveryRESTMapper(discoveryClient)
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
 	restMapper.Reset()
 	deletableResources := garbagecollector.GetDeletableResources(discoveryClient)
 	config := *result.ClientConfig
-	config.ContentConfig = dynamic.ContentConfig()
-	metaOnlyClientPool := dynamic.NewClientPool(&config, restMapper, dynamic.LegacyAPIPathResolverFunc)
-	clientPool := dynamic.NewClientPool(&config, restMapper, dynamic.LegacyAPIPathResolverFunc)
 	dynamicClient, err := dynamic.NewForConfig(&config)
 	if err != nil {
 		t.Fatalf("failed to create dynamicClient: %v", err)
@@ -235,8 +232,7 @@ func setupWithServer(t *testing.T, result *kubeapiservertesting.TestServer, work
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
 	gc, err := garbagecollector.NewGarbageCollector(
-		metaOnlyClientPool,
-		clientPool,
+		dynamicClient,
 		restMapper,
 		deletableResources,
 		garbagecollector.DefaultIgnoredResources(),
@@ -816,7 +812,7 @@ func TestCustomResourceCascadingDeletion(t *testing.T) {
 
 	// Create a custom owner resource.
 	owner := newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner"))
-	owner, err := resourceClient.Create(owner)
+	owner, err := resourceClient.Create(owner, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner resource %q: %v", owner.GetName(), err)
 	}
@@ -826,7 +822,7 @@ func TestCustomResourceCascadingDeletion(t *testing.T) {
 	dependent := newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("dependent"))
 	link(t, owner, dependent)
 
-	dependent, err = resourceClient.Create(dependent)
+	dependent, err = resourceClient.Create(dependent, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create dependent resource %q: %v", dependent.GetName(), err)
 	}
@@ -877,7 +873,7 @@ func TestMixedRelationships(t *testing.T) {
 	definition, resourceClient := createRandomCustomResourceDefinition(t, apiExtensionClient, dynamicClient, ns.Name)
 
 	// Create a custom owner resource.
-	customOwner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")))
+	customOwner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner: %v", err)
 	}
@@ -904,7 +900,7 @@ func TestMixedRelationships(t *testing.T) {
 	coreOwner.TypeMeta.Kind = "ConfigMap"
 	coreOwner.TypeMeta.APIVersion = "v1"
 	link(t, coreOwner, customDependent)
-	customDependent, err = resourceClient.Create(customDependent)
+	customDependent, err = resourceClient.Create(customDependent, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create dependent: %v", err)
 	}
@@ -975,7 +971,7 @@ func TestCRDDeletionCascading(t *testing.T) {
 	definition, resourceClient := createRandomCustomResourceDefinition(t, apiExtensionClient, dynamicClient, ns.Name)
 
 	// Create a custom owner resource.
-	owner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")))
+	owner, err := resourceClient.Create(newCRDInstance(definition, ns.Name, names.SimpleNameGenerator.GenerateName("owner")), metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("failed to create owner: %v", err)
 	}

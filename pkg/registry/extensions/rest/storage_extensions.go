@@ -36,7 +36,7 @@ import (
 type RESTStorageProvider struct{}
 
 func (p RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, bool) {
-	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(extensions.GroupName, legacyscheme.Registry, legacyscheme.Scheme, legacyscheme.ParameterCodec, legacyscheme.Codecs)
+	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(extensions.GroupName, legacyscheme.Scheme, legacyscheme.ParameterCodec, legacyscheme.Codecs)
 	// If you add a version here, be sure to add an entry in `k8s.io/kubernetes/cmd/kube-apiserver/app/aggregator.go with specific priorities.
 	// TODO refactor the plumbing to provide the information in the APIGroupInfo
 
@@ -46,6 +46,17 @@ func (p RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorag
 
 	return apiGroupInfo, true
 }
+
+type RollbackREST struct {
+	*deploymentstore.RollbackREST
+}
+
+// override RollbackREST.ProducesObject
+func (r *RollbackREST) ProducesObject(verb string) interface{} {
+	return extensionsapiv1beta1.DeploymentStatus{}
+}
+
+var _ = rest.StorageMetadata(&RollbackREST{})
 
 func (p RESTStorageProvider) v1beta1Storage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) map[string]rest.Storage {
 	storage := map[string]rest.Storage{}
@@ -65,7 +76,7 @@ func (p RESTStorageProvider) v1beta1Storage(apiResourceConfigSource serverstorag
 	deploymentStorage := deploymentstore.NewStorage(restOptionsGetter)
 	storage["deployments"] = deploymentStorage.Deployment.WithCategories(nil)
 	storage["deployments/status"] = deploymentStorage.Status
-	storage["deployments/rollback"] = deploymentStorage.Rollback
+	storage["deployments/rollback"] = &RollbackREST{deploymentStorage.Rollback}
 	storage["deployments/scale"] = deploymentStorage.Scale
 	// ingresses
 	ingressStorage, ingressStatusStorage := ingressstore.NewREST(restOptionsGetter)

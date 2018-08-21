@@ -25,9 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 func TestCreatePriorityClass(t *testing.T) {
@@ -35,10 +35,10 @@ func TestCreatePriorityClass(t *testing.T) {
 	tf := cmdtesting.NewTestFactory()
 	defer tf.Cleanup()
 
-	ns := legacyscheme.Codecs
+	ns := scheme.Codecs
 
 	tf.Client = &fake.RESTClient{
-		GroupVersion:         schema.GroupVersion{Group: "scheduling.k8s.io", Version: "v1alpha1"},
+		GroupVersion:         schema.GroupVersion{Group: "scheduling.k8s.io", Version: "v1beta1"},
 		NegotiatedSerializer: ns,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -59,7 +59,7 @@ func TestCreatePriorityClass(t *testing.T) {
 	cmd.Flags().Set("dry-run", "true")
 	cmd.Flags().Set("output", outputFormat)
 
-	printFlags := NewPrintFlags("created")
+	printFlags := genericclioptions.NewPrintFlags("created").WithTypeSetter(scheme.Scheme)
 	printFlags.OutputFormat = &outputFormat
 
 	options := &PriorityClassOpts{
@@ -69,12 +69,12 @@ func TestCreatePriorityClass(t *testing.T) {
 			IOStreams:  ioStreams,
 		},
 	}
-	err := options.Complete(cmd, []string{pcName})
+	err := options.Complete(tf, cmd, []string{pcName})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	err = options.Run(tf)
+	err = options.Run()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

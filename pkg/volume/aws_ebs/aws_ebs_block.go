@@ -29,14 +29,11 @@ import (
 	"k8s.io/kubernetes/pkg/util/mount"
 	kstrings "k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/volumepathhandler"
 )
 
-var _ volume.VolumePlugin = &awsElasticBlockStorePlugin{}
-var _ volume.PersistentVolumePlugin = &awsElasticBlockStorePlugin{}
 var _ volume.BlockVolumePlugin = &awsElasticBlockStorePlugin{}
-var _ volume.DeletableVolumePlugin = &awsElasticBlockStorePlugin{}
-var _ volume.ProvisionableVolumePlugin = &awsElasticBlockStorePlugin{}
 
 func (plugin *awsElasticBlockStorePlugin) ConstructBlockVolumeSpec(podUID types.UID, volumeName, mapPath string) (*volume.Spec, error) {
 	pluginDir := plugin.host.GetVolumeDevicePluginDir(awsElasticBlockStorePluginName)
@@ -153,6 +150,10 @@ var _ volume.BlockVolumeMapper = &awsElasticBlockStoreMapper{}
 
 func (b *awsElasticBlockStoreMapper) SetUpDevice() (string, error) {
 	return "", nil
+}
+
+func (b *awsElasticBlockStoreMapper) MapDevice(devicePath, globalMapPath, volumeMapPath, volumeMapName string, podUID types.UID) error {
+	return util.MapBlockVolume(devicePath, globalMapPath, volumeMapPath, volumeMapName, podUID)
 }
 
 // GetGlobalMapPath returns global map path and error

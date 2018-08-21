@@ -120,7 +120,7 @@ type kubeGenericRuntimeManager struct {
 
 type KubeGenericRuntime interface {
 	kubecontainer.Runtime
-	kubecontainer.IndirectStreamingRuntime
+	kubecontainer.StreamingRuntime
 	kubecontainer.ContainerCommandRunner
 }
 
@@ -510,7 +510,7 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 		if containerStatus == nil || containerStatus.State != kubecontainer.ContainerStateRunning {
 			if kubecontainer.ShouldContainerBeRestarted(&container, pod, podStatus) {
 				message := fmt.Sprintf("Container %+v is dead, but RestartPolicy says that we should restart it.", container)
-				glog.Info(message)
+				glog.V(3).Infof(message)
 				changes.ContainersToStart = append(changes.ContainersToStart, idx)
 			}
 			continue
@@ -754,7 +754,7 @@ func (m *kubeGenericRuntimeManager) doBackOff(pod *v1.Pod, container *v1.Contain
 		return false, "", nil
 	}
 
-	glog.Infof("checking backoff for container %q in pod %q", container.Name, format.Pod(pod))
+	glog.V(3).Infof("checking backoff for container %q in pod %q", container.Name, format.Pod(pod))
 	// Use the finished time of the latest exited container as the start point to calculate whether to do back-off.
 	ts := cStatus.FinishedAt
 	// backOff requires a unique key to identify the container.
@@ -764,7 +764,7 @@ func (m *kubeGenericRuntimeManager) doBackOff(pod *v1.Pod, container *v1.Contain
 			m.recorder.Eventf(ref, v1.EventTypeWarning, events.BackOffStartContainer, "Back-off restarting failed container")
 		}
 		err := fmt.Errorf("Back-off %s restarting failed container=%s pod=%s", backOff.Get(key), container.Name, format.Pod(pod))
-		glog.Infof("%s", err.Error())
+		glog.V(3).Infof("%s", err.Error())
 		return true, err.Error(), kubecontainer.ErrCrashLoopBackOff
 	}
 
@@ -801,24 +801,6 @@ func (m *kubeGenericRuntimeManager) killPodWithSyncResult(pod *v1.Pod, runningPo
 	}
 
 	return
-}
-
-// isHostNetwork checks whether the pod is running in host-network mode.
-func (m *kubeGenericRuntimeManager) isHostNetwork(podSandBoxID string, pod *v1.Pod) (bool, error) {
-	if pod != nil {
-		return kubecontainer.IsHostNetworkPod(pod), nil
-	}
-
-	podStatus, err := m.runtimeService.PodSandboxStatus(podSandBoxID)
-	if err != nil {
-		return false, err
-	}
-
-	if podStatus.GetLinux().GetNamespaces().GetOptions().GetNetwork() == runtimeapi.NamespaceMode_NODE {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 // GetPodStatus retrieves the status of the pod, including the

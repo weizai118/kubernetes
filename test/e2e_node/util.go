@@ -45,6 +45,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/remote"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/metrics"
+	frameworkmetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -57,8 +58,10 @@ var startServices = flag.Bool("start-services", true, "If true, start local node
 var stopServices = flag.Bool("stop-services", true, "If true, stop local node services after running tests")
 var busyboxImage = "busybox"
 
-// Kubelet internal cgroup name for node allocatable cgroup.
-const defaultNodeAllocatableCgroup = "kubepods"
+const (
+	// Kubelet internal cgroup name for node allocatable cgroup.
+	defaultNodeAllocatableCgroup = "kubepods"
+)
 
 func getNodeSummary() (*stats.Summary, error) {
 	req, err := http.NewRequest("GET", *kubeletAddress+"/stats/summary", nil)
@@ -135,7 +138,7 @@ func isKubeletConfigEnabled(f *framework.Framework) (bool, error) {
 	}
 	v, ok := cfgz.FeatureGates[string(features.DynamicKubeletConfig)]
 	if !ok {
-		return false, nil
+		return true, nil
 	}
 	return v, nil
 }
@@ -167,10 +170,10 @@ func setKubeletConfiguration(f *framework.Framework, kubeCfg *kubeletconfig.Kube
 
 	// create the reference and set Node.Spec.ConfigSource
 	src := &apiv1.NodeConfigSource{
-		ConfigMapRef: &apiv1.ObjectReference{
-			Namespace: "kube-system",
-			Name:      cm.Name,
-			UID:       cm.UID,
+		ConfigMap: &apiv1.ConfigMapNodeConfigSource{
+			Namespace:        "kube-system",
+			Name:             cm.Name,
+			KubeletConfigKey: "kubelet",
 		},
 	}
 
@@ -219,17 +222,6 @@ func setNodeConfigSource(f *framework.Framework, source *apiv1.NodeConfigSource)
 		return err
 	}
 
-	return nil
-}
-
-// getKubeletConfigOkCondition returns the first NodeCondition in `cs` with Type == apiv1.NodeKubeletConfigOk,
-// or if no such condition exists, returns nil.
-func getKubeletConfigOkCondition(cs []apiv1.NodeCondition) *apiv1.NodeCondition {
-	for i := range cs {
-		if cs[i].Type == apiv1.NodeKubeletConfigOk {
-			return &cs[i]
-		}
-	}
 	return nil
 }
 
@@ -328,18 +320,38 @@ func getLocalNode(f *framework.Framework) *apiv1.Node {
 	return &nodeList.Items[0]
 }
 
-// logs prometheus metrics from the local kubelet.
-func logKubeletMetrics(metricKeys ...string) {
+// logKubeletLatencyMetrics logs KubeletLatencyMetrics computed from the Prometheus
+// metrics exposed on the current node and identified by the metricNames.
+// The Kubelet subsystem prefix is automatically prepended to these metric names.
+func logKubeletLatencyMetrics(metricNames ...string) {
 	metricSet := sets.NewString()
-	for _, key := range metricKeys {
+	for _, key := range metricNames {
 		metricSet.Insert(kubeletmetrics.KubeletSubsystem + "_" + key)
 	}
 	metric, err := metrics.GrabKubeletMetricsWithoutProxy(framework.TestContext.NodeName + ":10255")
 	if err != nil {
 		framework.Logf("Error getting kubelet metrics: %v", err)
 	} else {
-		framework.Logf("Kubelet Metrics: %+v", framework.GetKubeletMetrics(metric, metricSet))
+		framework.Logf("Kubelet Metrics: %+v", framework.GetKubeletLatencyMetrics(metric, metricSet))
 	}
+}
+
+// returns config related metrics from the local kubelet, filtered to the filterMetricNames passed in
+func getKubeletMetrics(filterMetricNames sets.String) (frameworkmetrics.KubeletMetrics, error) {
+	// grab Kubelet metrics
+	ms, err := metrics.GrabKubeletMetricsWithoutProxy(framework.TestContext.NodeName + ":10255")
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := metrics.NewKubeletMetrics()
+	for name := range ms {
+		if !filterMetricNames.Has(name) {
+			continue
+		}
+		filtered[name] = ms[name]
+	}
+	return filtered, nil
 }
 
 // runCommand runs the cmd and returns the combined stdout and stderr, or an

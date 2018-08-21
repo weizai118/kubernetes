@@ -75,8 +75,7 @@ ALLOWED_NOTREADY_NODES="${ALLOWED_NOTREADY_NODES:-$((NUM_NODES / 100))}"
 # you are updating the os image versions, update this variable.
 # Also please update corresponding image for node e2e at:
 # https://github.com/kubernetes/kubernetes/blob/master/test/e2e_node/jenkins/image-config.yaml
-CVM_VERSION=${CVM_VERSION:-container-vm-v20170627}
-GCI_VERSION=${KUBE_GCI_VERSION:-cos-beta-66-10452-28-0}
+GCI_VERSION=${KUBE_GCI_VERSION:-cos-stable-65-10323-64-0}
 MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-}
 MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-cos-cloud}
 NODE_IMAGE=${KUBE_GCE_NODE_IMAGE:-${GCI_VERSION}}
@@ -101,7 +100,6 @@ CLUSTER_NAME="${CLUSTER_NAME:-${INSTANCE_PREFIX}}"
 MASTER_NAME="${INSTANCE_PREFIX}-master"
 AGGREGATOR_MASTER_NAME="${INSTANCE_PREFIX}-aggregator"
 INITIAL_ETCD_CLUSTER="${MASTER_NAME}"
-ETCD_QUORUM_READ="${ENABLE_ETCD_QUORUM_READ:-false}"
 MASTER_TAG="${INSTANCE_PREFIX}-master"
 NODE_TAG="${INSTANCE_PREFIX}-minion"
 
@@ -144,7 +142,7 @@ ENABLE_L7_LOADBALANCING="${KUBE_ENABLE_L7_LOADBALANCING:-glbc}"
 #   stackdriver    - Heapster, Google Cloud Monitoring (schema container), and Google Cloud Logging
 #   googleinfluxdb - Enable influxdb and google (except GCM)
 #   standalone     - Heapster only. Metrics available via Heapster REST API.
-ENABLE_CLUSTER_MONITORING="${KUBE_ENABLE_CLUSTER_MONITORING:-influxdb}"
+ENABLE_CLUSTER_MONITORING="${KUBE_ENABLE_CLUSTER_MONITORING:-standalone}"
 
 # Optional: Enable deploying separate prometheus stack for monitoring kubernetes cluster
 ENABLE_PROMETHEUS_MONITORING="${KUBE_ENABLE_PROMETHEUS_MONITORING:-false}"
@@ -191,13 +189,13 @@ TEST_CLUSTER_RESYNC_PERIOD="${TEST_CLUSTER_RESYNC_PERIOD:---min-resync-period=3m
 TEST_CLUSTER_API_CONTENT_TYPE="${TEST_CLUSTER_API_CONTENT_TYPE:-}"
 
 KUBELET_TEST_ARGS="${KUBELET_TEST_ARGS:-} --serialize-image-pulls=false ${TEST_CLUSTER_API_CONTENT_TYPE}"
-if [[ "${NODE_OS_DISTRIBUTION}" == "gci" ]] || [[ "${NODE_OS_DISTRIBUTION}" == "ubuntu" ]] || [[ "${NODE_OS_DISTRIBUTION}" == "custom" ]]; then
-  NODE_KUBELET_TEST_ARGS=" --experimental-kernel-memcg-notification=true"
+if [[ "${NODE_OS_DISTRIBUTION}" == "gci" ]] || [[ "${NODE_OS_DISTRIBUTION}" == "ubuntu" ]] || [[ "${NODE_OS_DISTRIBUTION}" == "custom" ]]; then 
+  NODE_KUBELET_TEST_ARGS="${NODE_KUBELET_TEST_ARGS:-} --experimental-kernel-memcg-notification=true"  
+fi 
+if [[ "${MASTER_OS_DISTRIBUTION}" == "gci" ]] || [[ "${MASTER_OS_DISTRIBUTION}" == "ubuntu" ]]; then 
+  MASTER_KUBELET_TEST_ARGS="${MASTER_KUBELET_TEST_ARGS:-} --experimental-kernel-memcg-notification=true"  
 fi
-if [[ "${MASTER_OS_DISTRIBUTION}" == "gci" ]] || [[ "${MASTER_OS_DISTRIBUTION}" == "ubuntu" ]]; then
-  MASTER_KUBELET_TEST_ARGS=" --experimental-kernel-memcg-notification=true"
-fi
-APISERVER_TEST_ARGS="${APISERVER_TEST_ARGS:-} --vmodule=httplog=3 --runtime-config=extensions/v1beta1 ${TEST_CLUSTER_DELETE_COLLECTION_WORKERS} ${TEST_CLUSTER_MAX_REQUESTS_INFLIGHT}"
+APISERVER_TEST_ARGS="${APISERVER_TEST_ARGS:-} --vmodule=httplog=3 --runtime-config=extensions/v1beta1,scheduling.k8s.io/v1alpha1,settings.k8s.io/v1alpha1 ${TEST_CLUSTER_DELETE_COLLECTION_WORKERS} ${TEST_CLUSTER_MAX_REQUESTS_INFLIGHT}"
 CONTROLLER_MANAGER_TEST_ARGS="${CONTROLLER_MANAGER_TEST_ARGS:-} ${TEST_CLUSTER_RESYNC_PERIOD} ${TEST_CLUSTER_API_CONTENT_TYPE}"
 SCHEDULER_TEST_ARGS="${SCHEDULER_TEST_ARGS:-} ${TEST_CLUSTER_API_CONTENT_TYPE}"
 KUBEPROXY_TEST_ARGS="${KUBEPROXY_TEST_ARGS:-} ${TEST_CLUSTER_API_CONTENT_TYPE}"
@@ -212,6 +210,18 @@ NODE_LABELS="${KUBE_NODE_LABELS:-beta.kubernetes.io/fluentd-ds-ready=true}"
 # NON_MASTER_NODE_LABELS are labels will only be applied on non-master nodes.
 NON_MASTER_NODE_LABELS="${KUBE_NON_MASTER_NODE_LABELS:-}"
 
+# Optional: Enable netd.
+ENABLE_NETD="${KUBE_ENABLE_NETD:-false}"
+CUSTOM_NETD_YAML="${KUBE_CUSTOM_NETD_YAML:-}"
+CUSTOM_CALICO_NODE_DAEMONSET_YAML="${KUBE_CUSTOM_CALICO_NODE_DAEMONSET_YAML:-}"
+CUSTOM_TYPHA_DEPLOYMENT_YAML="${KUBE_CUSTOM_TYPHA_DEPLOYMENT_YAML:-}"
+
+# To avoid running netd on a node that is not configured appropriately,
+# label each Node so that the DaemonSet can run the Pods only on ready Nodes.
+if [[ ${ENABLE_NETD:-} == "true" ]]; then
+	NON_MASTER_NODE_LABELS="${NON_MASTER_NODE_LABELS:+${NON_MASTER_NODE_LABELS},}beta.kubernetes.io/kube-netd-ready=true"
+fi
+
 # To avoid running Calico on a node that is not configured appropriately,
 # label each Node so that the DaemonSet can run the Pods only on ready Nodes.
 if [[ ${NETWORK_POLICY_PROVIDER:-} == "calico" ]]; then
@@ -221,6 +231,7 @@ fi
 # Enable metadata concealment by firewalling pod traffic to the metadata server
 # and run a proxy daemonset on nodes.
 ENABLE_METADATA_CONCEALMENT="${ENABLE_METADATA_CONCEALMENT:-true}" # true, false
+METADATA_CONCEALMENT_NO_FIREWALL="${METADATA_CONCEALMENT_NO_FIREWALL:-false}" # true, false
 if [[ ${ENABLE_METADATA_CONCEALMENT:-} == "true" ]]; then
   # Put the necessary label on the node so the daemonset gets scheduled.
   NODE_LABELS="${NODE_LABELS},beta.kubernetes.io/metadata-proxy-ready=true"
@@ -336,7 +347,7 @@ if [[ -n "${GCE_GLBC_IMAGE:-}" ]]; then
 fi
 
 if [[ -z "${KUBE_ADMISSION_CONTROL:-}" ]]; then
-  ADMISSION_CONTROL="Initializers,NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeLabel,PodPreset,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection"
+  ADMISSION_CONTROL="NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeLabel,PodPreset,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection"
   if [[ "${ENABLE_POD_SECURITY_POLICY:-}" == "true" ]]; then
     ADMISSION_CONTROL="${ADMISSION_CONTROL},PodSecurityPolicy"
   fi
@@ -409,6 +420,8 @@ if [[ -n "${LOGROTATE_MAX_SIZE:-}" ]]; then
 fi
 
 # Fluentd requirements
+# YAML exists to trigger a configuration refresh when changes are made.
+FLUENTD_GCP_YAML_VERSION="v3.1.0"
 FLUENTD_GCP_VERSION="${FLUENTD_GCP_VERSION:-0.2-1.5.30-1-k8s}"
 FLUENTD_GCP_MEMORY_LIMIT="${FLUENTD_GCP_MEMORY_LIMIT:-}"
 FLUENTD_GCP_CPU_REQUEST="${FLUENTD_GCP_CPU_REQUEST:-}"
@@ -420,8 +433,14 @@ HEAPSTER_GCP_MEMORY_PER_NODE="${HEAPSTER_GCP_MEMORY_PER_NODE:-4}"
 HEAPSTER_GCP_BASE_CPU="${HEAPSTER_GCP_BASE_CPU:-80m}"
 HEAPSTER_GCP_CPU_PER_NODE="${HEAPSTER_GCP_CPU_PER_NODE:-0.5}"
 
+# Optional: custom system banner for dashboard addon
+CUSTOM_KUBE_DASHBOARD_BANNER="${CUSTOM_KUBE_DASHBOARD_BANNER:-}"
+
+# Default Stackdriver resources version exported by Fluentd-gcp addon
+LOGGING_STACKDRIVER_RESOURCE_TYPES="${LOGGING_STACKDRIVER_RESOURCE_TYPES:-old}"
+
 # Adding to PROVIDER_VARS, since this is GCP-specific.
-PROVIDER_VARS="${PROVIDER_VARS:-} FLUENTD_GCP_VERSION FLUENTD_GCP_MEMORY_LIMIT FLUENTD_GCP_CPU_REQUEST FLUENTD_GCP_MEMORY_REQUEST HEAPSTER_GCP_BASE_MEMORY HEAPSTER_GCP_MEMORY_PER_NODE HEAPSTER_GCP_BASE_CPU HEAPSTER_GCP_CPU_PER_NODE CUSTOM_KUBE_DASHBOARD_BANNER LOGGING_STACKDRIVER_RESOURCE_TYPES STACKDRIVER_METADATA_AGENT_URL"
+PROVIDER_VARS="${PROVIDER_VARS:-} FLUENTD_GCP_YAML_VERSION FLUENTD_GCP_VERSION FLUENTD_GCP_MEMORY_LIMIT FLUENTD_GCP_CPU_REQUEST FLUENTD_GCP_MEMORY_REQUEST HEAPSTER_GCP_BASE_MEMORY HEAPSTER_GCP_MEMORY_PER_NODE HEAPSTER_GCP_BASE_CPU HEAPSTER_GCP_CPU_PER_NODE CUSTOM_KUBE_DASHBOARD_BANNER LOGGING_STACKDRIVER_RESOURCE_TYPES"
 
 # Fluentd configuration for node-journal
 ENABLE_NODE_JOURNAL="${ENABLE_NODE_JOURNAL:-false}"

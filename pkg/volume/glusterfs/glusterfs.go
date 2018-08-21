@@ -288,23 +288,42 @@ func (c *glusterfsUnmounter) TearDownAt(dir string) error {
 
 func (b *glusterfsMounter) setUpAtInternal(dir string) error {
 	var errs error
-
 	options := []string{}
+	hasLogFile := false
+	log := ""
+
 	if b.readOnly {
 		options = append(options, "ro")
+
 	}
 
-	p := path.Join(b.glusterfs.plugin.host.GetPluginDir(glusterfsPluginName), b.glusterfs.volName)
-	if err := os.MkdirAll(p, 0750); err != nil {
-		return fmt.Errorf("failed to create directory %v: %v", p, err)
+	// Check logfile has been provided by user, if provided, use that as the log file.
+	for _, userOpt := range b.mountOptions {
+		if dstrings.HasPrefix(userOpt, "log-file") {
+			glog.V(4).Infof("log-file mount option has provided")
+			hasLogFile = true
+			break
+		}
 	}
 
-	// adding log-level ERROR to remove noise
-	// and more specific log path so each pod has
-	// its own log based on PV + Pod
-	log := path.Join(p, b.pod.Name+"-glusterfs.log")
-	options = append(options, "log-level=ERROR")
+	// If logfile has not been provided, create driver specific log file.
+	if !hasLogFile {
+		log = ""
+		p := path.Join(b.glusterfs.plugin.host.GetPluginDir(glusterfsPluginName), b.glusterfs.volName)
+		if err := os.MkdirAll(p, 0750); err != nil {
+			return fmt.Errorf("failed to create directory %v: %v", p, err)
+		}
+
+		// adding log-level ERROR to remove noise
+		// and more specific log path so each pod has
+		// its own log based on PV + Pod
+		log = path.Join(p, b.pod.Name+"-glusterfs.log")
+
+	}
+
+	// Use derived/provided log file in gluster fuse mount
 	options = append(options, "log-file="+log)
+	options = append(options, "log-level=ERROR")
 
 	var addrlist []string
 	if b.hosts == nil {
@@ -322,7 +341,11 @@ func (b *glusterfsMounter) setUpAtInternal(dir string) error {
 		}
 
 	}
+
+	//Add backup-volfile-servers and auto_unmount options.
 	options = append(options, "backup-volfile-servers="+dstrings.Join(addrlist[:], ":"))
+	options = append(options, "auto_unmount")
+
 	mountOptions := volutil.JoinMountOptions(b.mountOptions, options)
 
 	// with `backup-volfile-servers` mount option in place, it is not required to
@@ -664,7 +687,7 @@ func (d *glusterfsVolumeDeleter) Delete() error {
 	return nil
 }
 
-func (p *glusterfsVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
+func (p *glusterfsVolumeProvisioner) Provision(selectedNode *v1.Node, allowedTopologies []v1.TopologySelectorTerm) (*v1.PersistentVolume, error) {
 	if !volutil.AccessModesContainedInAll(p.plugin.GetAccessModes(), p.options.PVC.Spec.AccessModes) {
 		return nil, fmt.Errorf("invalid AccessModes %v: only AccessModes %v are supported", p.options.PVC.Spec.AccessModes, p.plugin.GetAccessModes())
 	}
@@ -673,6 +696,11 @@ func (p *glusterfsVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
 		glog.V(4).Infof("not able to parse your claim Selector")
 		return nil, fmt.Errorf("not able to parse your claim Selector")
 	}
+
+	if volutil.CheckPersistentVolumeClaimModeBlock(p.options.PVC) {
+		return nil, fmt.Errorf("%s does not support block volume provisioning", p.plugin.GetPluginName())
+	}
+
 	glog.V(4).Infof("Provision VolumeOptions %v", p.options)
 	scName := v1helper.GetPersistentVolumeClaimClass(p.options.PVC)
 	cfg, err := parseClassParameters(p.options.Parameters, p.plugin.host.GetKubeClient())
@@ -714,6 +742,7 @@ func (p *glusterfsVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
 	if len(pv.Spec.AccessModes) == 0 {
 		pv.Spec.AccessModes = p.plugin.GetAccessModes()
 	}
+
 	pv.Spec.MountOptions = p.options.MountOptions
 
 	gidStr := strconv.FormatInt(int64(gid), 10)
@@ -723,7 +752,6 @@ func (p *glusterfsVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
 		volutil.VolumeDynamicallyCreatedByKey: heketiAnn,
 		glusterTypeAnn:                        "file",
 		"Description":                         glusterDescAnn,
-		v1.MountOptionAnnotation:              "auto_unmount",
 		heketiVolIDAnn:                        volID,
 	}
 
@@ -739,7 +767,10 @@ func (p *glusterfsVolumeProvisioner) CreateVolume(gid int) (r *v1.GlusterfsVolum
 	capacity := p.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
 
 	// GlusterFS/heketi creates volumes in units of GiB.
-	sz := int(volutil.RoundUpToGiB(capacity))
+	sz, err := volutil.RoundUpToGiBInt(capacity)
+	if err != nil {
+		return nil, 0, "", err
+	}
 	glog.V(2).Infof("create volume of size %dGiB", sz)
 
 	if p.url == "" {

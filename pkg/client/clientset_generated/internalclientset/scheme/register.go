@@ -19,7 +19,6 @@ limitations under the License.
 package scheme
 
 import (
-	registered "k8s.io/apimachinery/pkg/apimachinery/registered"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +30,7 @@ import (
 	autoscaling "k8s.io/kubernetes/pkg/apis/autoscaling/install"
 	batch "k8s.io/kubernetes/pkg/apis/batch/install"
 	certificates "k8s.io/kubernetes/pkg/apis/certificates/install"
+	coordination "k8s.io/kubernetes/pkg/apis/coordination/install"
 	core "k8s.io/kubernetes/pkg/apis/core/install"
 	events "k8s.io/kubernetes/pkg/apis/events/install"
 	extensions "k8s.io/kubernetes/pkg/apis/extensions/install"
@@ -46,31 +46,28 @@ var Scheme = runtime.NewScheme()
 var Codecs = serializer.NewCodecFactory(Scheme)
 var ParameterCodec = runtime.NewParameterCodec(Scheme)
 
-var Registry = registered.NewAPIRegistrationManager()
-
 func init() {
 	v1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
-	Install(Registry, Scheme)
+	Install(Scheme)
 }
 
 // Install registers the API group and adds types to a scheme
-func Install(registry *registered.APIRegistrationManager, scheme *runtime.Scheme) {
-	admissionregistration.Install(registry, scheme)
-	core.Install(registry, scheme)
-	apps.Install(registry, scheme)
-	authentication.Install(registry, scheme)
-	authorization.Install(registry, scheme)
-	autoscaling.Install(registry, scheme)
-	batch.Install(registry, scheme)
-	certificates.Install(registry, scheme)
-	events.Install(registry, scheme)
-	extensions.Install(registry, scheme)
-	networking.Install(registry, scheme)
-	policy.Install(registry, scheme)
-	rbac.Install(registry, scheme)
-	scheduling.Install(registry, scheme)
-	settings.Install(registry, scheme)
-	storage.Install(registry, scheme)
-
-	ExtraInstall(registry, scheme)
+func Install(scheme *runtime.Scheme) {
+	admissionregistration.Install(scheme)
+	core.Install(scheme)
+	apps.Install(scheme)
+	authentication.Install(scheme)
+	authorization.Install(scheme)
+	autoscaling.Install(scheme)
+	batch.Install(scheme)
+	certificates.Install(scheme)
+	coordination.Install(scheme)
+	events.Install(scheme)
+	extensions.Install(scheme)
+	networking.Install(scheme)
+	policy.Install(scheme)
+	rbac.Install(scheme)
+	scheduling.Install(scheme)
+	settings.Install(scheme)
+	storage.Install(scheme)
 }

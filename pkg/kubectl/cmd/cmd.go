@@ -21,6 +21,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"syscall"
+
+	"github.com/spf13/cobra"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	utilflag "k8s.io/apiserver/pkg/util/flag"
@@ -33,9 +39,9 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/set"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/wait"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 
-	"github.com/spf13/cobra"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 )
 
@@ -94,13 +100,15 @@ __kubectl_parse_config()
     fi
 }
 
+# $1 is the name of resource (required)
+# $2 is template string for kubectl get (optional)
 __kubectl_parse_get()
 {
     local template
-    template="{{ range .items  }}{{ .metadata.name }} {{ end }}"
+    template="${2:-"{{ range .items  }}{{ .metadata.name }} {{ end }}"}"
     local kubectl_out
     if kubectl_out=$(kubectl get $(__kubectl_override_flags) -o template --template="${template}" "$1" 2>/dev/null); then
-        COMPREPLY=( $( compgen -W "${kubectl_out[*]}" -- "$cur" ) )
+        COMPREPLY+=( $( compgen -W "${kubectl_out[*]}" -- "$cur" ) )
     fi
 }
 
@@ -146,7 +154,7 @@ __kubectl_get_resource_clusterrole()
 __kubectl_get_containers()
 {
     local template
-    template="{{ range .spec.containers  }}{{ .name }} {{ end }}"
+    template="{{ range .spec.initContainers }}{{ .name }} {{end}}{{ range .spec.containers  }}{{ .name }} {{ end }}"
     __kubectl_debug "${FUNCNAME} nouns are ${nouns[*]}"
 
     local len="${#nouns[@]}"
@@ -169,6 +177,36 @@ __kubectl_require_pod_and_container()
     fi;
     __kubectl_get_containers
     return 0
+}
+
+__kubectl_cp()
+{
+    if [[ $(type -t compopt) = "builtin" ]]; then
+        compopt -o nospace
+    fi
+
+    case "$cur" in
+        /*|[.~]*) # looks like a path
+            return
+            ;;
+        *:*) # TODO: complete remote files in the pod
+            return
+            ;;
+        */*) # complete <namespace>/<pod>
+            local template namespace kubectl_out
+            template="{{ range .items }}{{ .metadata.namespace }}/{{ .metadata.name }}: {{ end }}"
+            namespace="${cur%%/*}"
+            if kubectl_out=( $(kubectl get $(__kubectl_override_flags) --namespace "${namespace}" -o template --template="${template}" pods 2>/dev/null) ); then
+                COMPREPLY=( $(compgen -W "${kubectl_out[*]}" -- "${cur}") )
+            fi
+            return
+            ;;
+        *) # complete namespaces, pods, and filedirs
+            __kubectl_parse_get "namespace" "{{ range .items  }}{{ .metadata.name }}/ {{ end }}"
+            __kubectl_parse_get "pod" "{{ range .items  }}{{ .metadata.name }}: {{ end }}"
+            _filedir
+            ;;
+    esac
 }
 
 __custom_func() {
@@ -203,6 +241,10 @@ __custom_func() {
             __kubectl_config_get_clusters
             return
             ;;
+        kubectl_cp)
+            __kubectl_cp
+            return
+            ;;
         *)
             ;;
     esac
@@ -220,7 +262,100 @@ var (
 )
 
 func NewDefaultKubectlCommand() *cobra.Command {
-	return NewKubectlCommand(os.Stdin, os.Stdout, os.Stderr)
+	return NewDefaultKubectlCommandWithArgs(&defaultPluginHandler{}, os.Args, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func NewDefaultKubectlCommandWithArgs(pluginHandler PluginHandler, args []string, in io.Reader, out, errout io.Writer) *cobra.Command {
+	cmd := NewKubectlCommand(in, out, errout)
+
+	if pluginHandler == nil {
+		return cmd
+	}
+
+	if len(args) > 1 {
+		cmdPathPieces := args[1:]
+
+		// only look for suitable extension executables if
+		// the specified command does not already exist
+		if _, _, err := cmd.Find(cmdPathPieces); err != nil {
+			if err := handleEndpointExtensions(pluginHandler, cmdPathPieces); err != nil {
+				fmt.Fprintf(errout, "%v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	return cmd
+}
+
+// PluginHandler is capable of parsing command line arguments
+// and performing executable filename lookups to search
+// for valid plugin files, and execute found plugins.
+type PluginHandler interface {
+	// Lookup receives a potential filename and returns
+	// a full or relative path to an executable, if one
+	// exists at the given filename, or an error.
+	Lookup(filename string) (string, error)
+	// Execute receives an executable's filepath, a slice
+	// of arguments, and a slice of environment variables
+	// to relay to the executable.
+	Execute(executablePath string, cmdArgs, environment []string) error
+}
+
+type defaultPluginHandler struct{}
+
+// Lookup implements PluginHandler
+func (h *defaultPluginHandler) Lookup(filename string) (string, error) {
+	// if on Windows, append the "exe" extension
+	// to the filename that we are looking up.
+	if runtime.GOOS == "windows" {
+		filename = filename + ".exe"
+	}
+
+	return exec.LookPath(filename)
+}
+
+// Execute implements PluginHandler
+func (h *defaultPluginHandler) Execute(executablePath string, cmdArgs, environment []string) error {
+	return syscall.Exec(executablePath, cmdArgs, environment)
+}
+
+func handleEndpointExtensions(pluginHandler PluginHandler, cmdArgs []string) error {
+	remainingArgs := []string{} // all "non-flag" arguments
+
+	for idx := range cmdArgs {
+		if strings.HasPrefix(cmdArgs[idx], "-") {
+			break
+		}
+		remainingArgs = append(remainingArgs, strings.Replace(cmdArgs[idx], "-", "_", -1))
+	}
+
+	foundBinaryPath := ""
+
+	// attempt to find binary, starting at longest possible name with given cmdArgs
+	for len(remainingArgs) > 0 {
+		path, err := pluginHandler.Lookup(fmt.Sprintf("kubectl-%s", strings.Join(remainingArgs, "-")))
+		if err != nil || len(path) == 0 {
+			remainingArgs = remainingArgs[:len(remainingArgs)-1]
+			continue
+		}
+
+		foundBinaryPath = path
+		break
+	}
+
+	if len(foundBinaryPath) == 0 {
+		return nil
+	}
+
+	// invoke cmd binary relaying the current environment and args given
+	// remainingArgs will always have at least one element.
+	// execve will make remainingArgs[0] the "binary name".
+	if err := pluginHandler.Execute(foundBinaryPath, append([]string{foundBinaryPath}, cmdArgs[len(remainingArgs):]...), os.Environ()); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // NewKubectlCommand creates the `kubectl` command and its nested children.
@@ -238,13 +373,21 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 		BashCompletionFunction: bashCompletionFunc,
 	}
 
-	kubeConfigFlags := cmdutil.NewConfigFlags()
-	kubeConfigFlags.AddFlags(cmds.PersistentFlags())
+	flags := cmds.PersistentFlags()
+	flags.SetNormalizeFunc(utilflag.WarnWordSepNormalizeFunc) // Warn for "_" flags
+
+	// Normalize all flags that are coming from other packages or pre-configurations
+	// a.k.a. change all "_" to "-". e.g. glog package
+	flags.SetNormalizeFunc(utilflag.WordSepNormalizeFunc)
+
+	kubeConfigFlags := genericclioptions.NewConfigFlags()
+	kubeConfigFlags.AddFlags(flags)
+	matchVersionKubeConfigFlags := cmdutil.NewMatchVersionFlags(kubeConfigFlags)
+	matchVersionKubeConfigFlags.AddFlags(cmds.PersistentFlags())
 
 	cmds.PersistentFlags().AddGoFlagSet(flag.CommandLine)
 
-	f := cmdutil.NewFactory(kubeConfigFlags)
-	f.BindFlags(cmds.PersistentFlags())
+	f := cmdutil.NewFactory(matchVersionKubeConfigFlags)
 
 	// Sending in 'nil' for the getLanguageFn() results in using
 	// the LANG environment variable.
@@ -275,7 +418,7 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 				NewCmdExplain("kubectl", f, ioStreams),
 				get.NewCmdGet("kubectl", f, ioStreams),
 				NewCmdEdit(f, ioStreams),
-				NewCmdDelete(f, out, err),
+				NewCmdDelete(f, ioStreams),
 			},
 		},
 		{
@@ -292,7 +435,7 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 			Commands: []*cobra.Command{
 				NewCmdCertificate(f, ioStreams),
 				NewCmdClusterInfo(f, ioStreams),
-				NewCmdTop(f, out, err),
+				NewCmdTop(f, ioStreams),
 				NewCmdCordon(f, ioStreams),
 				NewCmdUncordon(f, ioStreams),
 				NewCmdDrain(f, ioStreams),
@@ -303,11 +446,11 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 			Message: "Troubleshooting and Debugging Commands:",
 			Commands: []*cobra.Command{
 				NewCmdDescribe("kubectl", f, ioStreams),
-				NewCmdLogs(f, out, err),
-				NewCmdAttach(f, in, out, err),
-				NewCmdExec(f, in, out, err),
-				NewCmdPortForward(f, out, err),
-				NewCmdProxy(f, out),
+				NewCmdLogs(f, ioStreams),
+				NewCmdAttach(f, ioStreams),
+				NewCmdExec(f, ioStreams),
+				NewCmdPortForward(f, ioStreams),
+				NewCmdProxy(f, ioStreams),
 				NewCmdCp(f, ioStreams),
 				auth.NewCmdAuth(f, ioStreams),
 			},
@@ -317,7 +460,8 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 			Commands: []*cobra.Command{
 				NewCmdApply("kubectl", f, ioStreams),
 				NewCmdPatch(f, ioStreams),
-				NewCmdReplace(f, out, err),
+				NewCmdReplace(f, ioStreams),
+				wait.NewCmdWait(f, ioStreams),
 				NewCmdConvert(f, ioStreams),
 			},
 		},
@@ -326,7 +470,7 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 			Commands: []*cobra.Command{
 				NewCmdLabel(f, ioStreams),
 				NewCmdAnnotate("kubectl", f, ioStreams),
-				NewCmdCompletion(out, ""),
+				NewCmdCompletion(ioStreams.Out, ""),
 			},
 		},
 	}
@@ -335,7 +479,7 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	filters := []string{"options"}
 
 	// Hide the "alpha" subcommand if there are no alpha commands in this build.
-	alpha := NewCmdAlpha(f, in, out, err)
+	alpha := NewCmdAlpha(f, ioStreams)
 	if !alpha.HasSubCommands() {
 		filters = append(filters, alpha.Name())
 	}
@@ -356,11 +500,11 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 
 	cmds.AddCommand(alpha)
 	cmds.AddCommand(cmdconfig.NewCmdConfig(f, clientcmd.NewDefaultPathOptions(), ioStreams))
-	cmds.AddCommand(NewCmdPlugin(f, in, out, err))
+	cmds.AddCommand(NewCmdPlugin(f, ioStreams))
 	cmds.AddCommand(NewCmdVersion(f, ioStreams))
 	cmds.AddCommand(NewCmdApiVersions(f, ioStreams))
 	cmds.AddCommand(NewCmdApiResources(f, ioStreams))
-	cmds.AddCommand(NewCmdOptions(out))
+	cmds.AddCommand(NewCmdOptions(ioStreams.Out))
 
 	return cmds
 }

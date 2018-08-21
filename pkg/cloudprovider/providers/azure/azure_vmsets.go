@@ -17,7 +17,7 @@ limitations under the License.
 package azure
 
 import (
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2017-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2017-09-01/network"
 
 	"k8s.io/api/core/v1"
@@ -35,9 +35,9 @@ type VMSet interface {
 	// GetInstanceTypeByNodeName gets the instance type by node name.
 	GetInstanceTypeByNodeName(name string) (string, error)
 	// GetIPByNodeName gets machine private IP and public IP by node name.
-	GetIPByNodeName(name, vmSetName string) (string, string, error)
-	// GetPrimaryInterface gets machine primary network interface by node name and vmSet.
-	GetPrimaryInterface(nodeName, vmSetName string) (network.Interface, error)
+	GetIPByNodeName(name string) (string, string, error)
+	// GetPrimaryInterface gets machine primary network interface by node name.
+	GetPrimaryInterface(nodeName string) (network.Interface, error)
 	// GetNodeNameByProviderID gets the node name by provider ID.
 	GetNodeNameByProviderID(providerID string) (types.NodeName, error)
 

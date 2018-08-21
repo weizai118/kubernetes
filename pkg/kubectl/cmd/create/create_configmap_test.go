@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
@@ -36,11 +35,11 @@ import (
 func TestCreateConfigMap(t *testing.T) {
 	configMap := &v1.ConfigMap{}
 	configMap.Name = "my-configmap"
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
-	ns := legacyscheme.Codecs
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+	ns := scheme.Codecs
 
 	tf.Client = &fake.RESTClient{
 		GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
@@ -55,7 +54,6 @@ func TestCreateConfigMap(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()
 	cmd := NewCmdCreateConfigMap(tf, ioStreams)
 	cmd.Flags().Set("output", "name")

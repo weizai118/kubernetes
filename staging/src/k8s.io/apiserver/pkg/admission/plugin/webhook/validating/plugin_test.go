@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -31,8 +33,8 @@ import (
 // TestValidate tests that ValidatingWebhook#Validate works as expected
 func TestValidate(t *testing.T) {
 	scheme := runtime.NewScheme()
-	v1beta1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 
 	testServer := webhooktesting.NewTestServer(t)
 	testServer.StartTLS()
@@ -46,12 +48,7 @@ func TestValidate(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	for _, tt := range webhooktesting.NewTestCases(serverURL) {
-		// TODO: re-enable all tests
-		if !strings.Contains(tt.Name, "no match") {
-			continue
-		}
-
+	for _, tt := range webhooktesting.NewNonMutatingTestCases(serverURL) {
 		wh, err := NewValidatingAdmissionWebhook(nil)
 		if err != nil {
 			t.Errorf("%s: failed to create validating webhook: %v", tt.Name, err)
@@ -75,7 +72,7 @@ func TestValidate(t *testing.T) {
 			continue
 		}
 
-		err = wh.Validate(webhooktesting.NewAttribute(ns))
+		err = wh.Validate(webhooktesting.NewAttribute(ns, nil, tt.IsDryRun))
 		if tt.ExpectAllow != (err == nil) {
 			t.Errorf("%s: expected allowed=%v, but got err=%v", tt.Name, tt.ExpectAllow, err)
 		}
@@ -94,8 +91,8 @@ func TestValidate(t *testing.T) {
 // TestValidateCachedClient tests that ValidatingWebhook#Validate should cache restClient
 func TestValidateCachedClient(t *testing.T) {
 	scheme := runtime.NewScheme()
-	v1beta1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 
 	testServer := webhooktesting.NewTestServer(t)
 	testServer.StartTLS()
@@ -133,7 +130,7 @@ func TestValidateCachedClient(t *testing.T) {
 			continue
 		}
 
-		err = wh.Validate(webhooktesting.NewAttribute(ns))
+		err = wh.Validate(webhooktesting.NewAttribute(ns, nil, false))
 		if tt.ExpectAllow != (err == nil) {
 			t.Errorf("%s: expected allowed=%v, but got err=%v", tt.Name, tt.ExpectAllow, err)
 		}

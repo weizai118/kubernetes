@@ -17,9 +17,9 @@ limitations under the License.
 package scheme
 
 import (
-	"k8s.io/apimachinery/pkg/apimachinery/registered"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/install"
@@ -33,19 +33,16 @@ var (
 	// Codecs provides methods for retrieving codecs and serializers for specific
 	// versions and content types.
 	Codecs = serializer.NewCodecFactory(Scheme)
-	// Registry is an instance of an API registry.  This is an interim step to start removing the idea of a global
-	// API registry.
-	Registry = registered.NewAPIRegistrationManager()
 )
 
 func init() {
 	AddToScheme(Scheme)
-	install.Install(Registry, Scheme)
+	install.Install(Scheme)
 }
 
 // AddToScheme adds the types of this group into the given scheme.
 func AddToScheme(scheme *runtime.Scheme) {
-	v1beta1.AddToScheme(scheme)
-	v1.AddToScheme(scheme)
-	apiregistration.AddToScheme(scheme)
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
+	utilruntime.Must(v1.AddToScheme(scheme))
+	utilruntime.Must(apiregistration.AddToScheme(scheme))
 }

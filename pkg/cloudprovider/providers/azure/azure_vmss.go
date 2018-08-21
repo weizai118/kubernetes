@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2017-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2017-09-01/network"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/golang/glog"
@@ -211,7 +211,8 @@ func (ss *scaleSet) GetInstanceTypeByNodeName(name string) (string, error) {
 	return "", nil
 }
 
-// GetZoneByNodeName gets cloudprovider.Zone by node name.
+// GetZoneByNodeName gets availability zone for the specified node. If the node is not running
+// with availability zone, then it returns fault domain.
 func (ss *scaleSet) GetZoneByNodeName(name string) (cloudprovider.Zone, error) {
 	managedByAS, err := ss.isNodeManagedByAvailabilitySet(name)
 	if err != nil {
@@ -228,14 +229,25 @@ func (ss *scaleSet) GetZoneByNodeName(name string) (cloudprovider.Zone, error) {
 		return cloudprovider.Zone{}, err
 	}
 
-	if vm.InstanceView != nil && vm.InstanceView.PlatformFaultDomain != nil {
-		return cloudprovider.Zone{
-			FailureDomain: strconv.Itoa(int(*vm.InstanceView.PlatformFaultDomain)),
-			Region:        *vm.Location,
-		}, nil
+	var failureDomain string
+	if vm.Zones != nil && len(*vm.Zones) > 0 {
+		// Get availability zone for the node.
+		zones := *vm.Zones
+		zoneID, err := strconv.Atoi(zones[0])
+		if err != nil {
+			return cloudprovider.Zone{}, fmt.Errorf("failed to parse zone %q: %v", zones, err)
+		}
+
+		failureDomain = ss.makeZone(zoneID)
+	} else if vm.InstanceView != nil && vm.InstanceView.PlatformFaultDomain != nil {
+		// Availability zone is not used for the node, falling back to fault domain.
+		failureDomain = strconv.Itoa(int(*vm.InstanceView.PlatformFaultDomain))
 	}
 
-	return cloudprovider.Zone{}, nil
+	return cloudprovider.Zone{
+		FailureDomain: failureDomain,
+		Region:        *vm.Location,
+	}, nil
 }
 
 // GetPrimaryVMSetName returns the VM set name depending on the configured vmType.
@@ -247,10 +259,10 @@ func (ss *scaleSet) GetPrimaryVMSetName() string {
 // GetIPByNodeName gets machine private IP and public IP by node name.
 // TODO(feiskyer): Azure vmss doesn't support associating a public IP to single virtual machine yet,
 // fix this after it is supported.
-func (ss *scaleSet) GetIPByNodeName(nodeName, vmSetName string) (string, string, error) {
-	nic, err := ss.GetPrimaryInterface(nodeName, vmSetName)
+func (ss *scaleSet) GetIPByNodeName(nodeName string) (string, string, error) {
+	nic, err := ss.GetPrimaryInterface(nodeName)
 	if err != nil {
-		glog.Errorf("error: ss.GetIPByNodeName(%s), GetPrimaryInterface(%q, %q), err=%v", nodeName, nodeName, vmSetName, err)
+		glog.Errorf("error: ss.GetIPByNodeName(%s), GetPrimaryInterface(%q), err=%v", nodeName, nodeName, err)
 		return "", "", err
 	}
 
@@ -418,7 +430,7 @@ func (ss *scaleSet) GetVMSetNames(service *v1.Service, nodes []*v1.Node) (vmSetN
 }
 
 // GetPrimaryInterface gets machine primary network interface by node name and vmSet.
-func (ss *scaleSet) GetPrimaryInterface(nodeName, vmSetName string) (network.Interface, error) {
+func (ss *scaleSet) GetPrimaryInterface(nodeName string) (network.Interface, error) {
 	managedByAS, err := ss.isNodeManagedByAvailabilitySet(nodeName)
 	if err != nil {
 		glog.Errorf("Failed to check isNodeManagedByAvailabilitySet: %v", err)
@@ -426,19 +438,13 @@ func (ss *scaleSet) GetPrimaryInterface(nodeName, vmSetName string) (network.Int
 	}
 	if managedByAS {
 		// vm is managed by availability set.
-		return ss.availabilitySet.GetPrimaryInterface(nodeName, "")
+		return ss.availabilitySet.GetPrimaryInterface(nodeName)
 	}
 
 	ssName, instanceID, vm, err := ss.getVmssVM(nodeName)
 	if err != nil {
 		glog.Errorf("error: ss.GetPrimaryInterface(%s), ss.getVmssVM(%s), err=%v", nodeName, nodeName, err)
 		return network.Interface{}, err
-	}
-
-	// Check scale set name.
-	// Backends of Standard load balancer could belong to multiple VMSS, so we don't check vmSet for it.
-	if !strings.EqualFold(ssName, vmSetName) && !ss.useStandardLoadBalancer() {
-		return network.Interface{}, errNotInVMSet
 	}
 
 	primaryInterfaceID, err := ss.getPrimaryInterfaceID(vm)
@@ -481,7 +487,7 @@ func (ss *scaleSet) getScaleSetWithRetry(name string) (compute.VirtualMachineSca
 			glog.Errorf("backoff: failure for scale set %q, will retry,err=%v", name, retryErr)
 			return false, nil
 		}
-		glog.V(4).Info("backoff: success for scale set %q", name)
+		glog.V(4).Infof("backoff: success for scale set %q", name)
 
 		if cached != nil {
 			exists = true
@@ -699,7 +705,7 @@ func (ss *scaleSet) EnsureHostsInPool(serviceName string, nodes []*v1.Node, back
 	}
 
 	for ssName, instanceIDs := range scalesets {
-		// Only add nodes belonging to specified vmSet to basic LB backends.
+		// Only add nodes belonging to specified vmSet for basic SKU LB.
 		if !ss.useStandardLoadBalancer() && !strings.EqualFold(ssName, vmSetName) {
 			continue
 		}
@@ -851,7 +857,7 @@ func (ss *scaleSet) EnsureBackendPoolDeleted(poolID, vmSetName string, backendAd
 
 				ssName, err := extractScaleSetNameByProviderID(*ipConfigurations.ID)
 				if err != nil {
-					glog.V(4).Infof("backend IP configuration %q is not belonging to any vmss, omit it")
+					glog.V(4).Infof("backend IP configuration %q is not belonging to any vmss, omit it", *ipConfigurations.ID)
 					continue
 				}
 

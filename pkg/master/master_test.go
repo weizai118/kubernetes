@@ -17,6 +17,7 @@ limitations under the License.
 package master
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io/ioutil"
@@ -64,7 +65,7 @@ import (
 )
 
 // setUp is a convience function for setting up for (most) tests.
-func setUp(t *testing.T) (*etcdtesting.EtcdTestServer, Config, informers.SharedInformerFactory, *assert.Assertions) {
+func setUp(t *testing.T) (*etcdtesting.EtcdTestServer, Config, *assert.Assertions) {
 	server, storageConfig := etcdtesting.NewUnsecuredEtcd3TestClientServer(t)
 
 	config := &Config{
@@ -77,7 +78,7 @@ func setUp(t *testing.T) (*etcdtesting.EtcdTestServer, Config, informers.SharedI
 		},
 	}
 
-	resourceEncoding := serverstorage.NewDefaultResourceEncodingConfig(legacyscheme.Registry)
+	resourceEncoding := serverstorage.NewDefaultResourceEncodingConfig(legacyscheme.Scheme)
 	resourceEncoding.SetVersionEncoding(api.GroupName, schema.GroupVersion{Group: "", Version: "v1"}, schema.GroupVersion{Group: api.GroupName, Version: runtime.APIVersionInternal})
 	resourceEncoding.SetVersionEncoding(autoscaling.GroupName, schema.GroupVersion{Group: "autoscaling", Version: "v1"}, schema.GroupVersion{Group: autoscaling.GroupName, Version: runtime.APIVersionInternal})
 	resourceEncoding.SetVersionEncoding(batch.GroupName, schema.GroupVersion{Group: "batch", Version: "v1"}, schema.GroupVersion{Group: batch.GroupName, Version: runtime.APIVersionInternal})
@@ -108,17 +109,37 @@ func setUp(t *testing.T) (*etcdtesting.EtcdTestServer, Config, informers.SharedI
 	config.GenericConfig.LoopbackClientConfig = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: legacyscheme.Codecs}}
 	config.ExtraConfig.KubeletClientConfig = kubeletclient.KubeletClientConfig{Port: 10250}
 	config.ExtraConfig.ProxyTransport = utilnet.SetTransportDefaults(&http.Transport{
-		Dial:            func(network, addr string) (net.Conn, error) { return nil, nil },
+		DialContext:     func(ctx context.Context, network, addr string) (net.Conn, error) { return nil, nil },
 		TLSClientConfig: &tls.Config{},
 	})
+
+	// set fake SecureServingInfo because the listener port is needed for the kubernetes service
+	config.GenericConfig.SecureServing = &genericapiserver.SecureServingInfo{Listener: fakeLocalhost443Listener{}}
 
 	clientset, err := kubernetes.NewForConfig(config.GenericConfig.LoopbackClientConfig)
 	if err != nil {
 		t.Fatalf("unable to create client set due to %v", err)
 	}
-	sharedInformers := informers.NewSharedInformerFactory(clientset, config.GenericConfig.LoopbackClientConfig.Timeout)
+	config.ExtraConfig.VersionedInformers = informers.NewSharedInformerFactory(clientset, config.GenericConfig.LoopbackClientConfig.Timeout)
 
-	return server, *config, sharedInformers, assert.New(t)
+	return server, *config, assert.New(t)
+}
+
+type fakeLocalhost443Listener struct{}
+
+func (fakeLocalhost443Listener) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (fakeLocalhost443Listener) Close() error {
+	return nil
+}
+
+func (fakeLocalhost443Listener) Addr() net.Addr {
+	return &net.TCPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: 443,
+	}
 }
 
 // TestLegacyRestStorageStrategies ensures that all Storage objects which are using the generic registry Store have
@@ -181,9 +202,9 @@ func TestCertificatesRestStorageStrategies(t *testing.T) {
 }
 
 func newMaster(t *testing.T) (*Master, *etcdtesting.EtcdTestServer, Config, *assert.Assertions) {
-	etcdserver, config, sharedInformers, assert := setUp(t)
+	etcdserver, config, assert := setUp(t)
 
-	master, err := config.Complete(sharedInformers).New(genericapiserver.NewEmptyDelegate())
+	master, err := config.Complete().New(genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		t.Fatalf("Error in bringing up the master: %v", err)
 	}

@@ -66,15 +66,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apimachinery/pkg/watch"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
+	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	clientset "k8s.io/client-go/kubernetes"
-	scaleclient "k8s.io/client-go/scale"
+	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	appsinternal "k8s.io/kubernetes/pkg/apis/apps"
@@ -88,12 +88,11 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 	nodectlr "k8s.io/kubernetes/pkg/controller/nodelifecycle"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/kubectl"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 	"k8s.io/kubernetes/pkg/master/ports"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
-	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
+	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
 	sshutil "k8s.io/kubernetes/pkg/ssh"
 	"k8s.io/kubernetes/pkg/util/system"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
@@ -115,6 +114,9 @@ const (
 	// Use it case by case when we are sure pod start will not be delayed
 	// minutes by slow docker pulls or something else.
 	PodStartShortTimeout = 1 * time.Minute
+
+	// How long to wait for a pod to be deleted
+	PodDeleteTimeout = 5 * time.Minute
 
 	// If there are any orphaned namespaces to clean up, this test is running
 	// on a long lived cluster. A long wait here is preferably to spurious test
@@ -207,7 +209,7 @@ const (
 )
 
 var (
-	BusyBoxImage = "busybox"
+	BusyBoxImage = imageutils.GetE2EImage(imageutils.BusyBox)
 	// Label allocated to the image puller static pod that runs on each node
 	// before e2es.
 	ImagePullerLabels = map[string]string{"name": "e2e-image-puller"}
@@ -248,11 +250,6 @@ func GetServerArchitecture(c clientset.Interface) string {
 	return arch
 }
 
-// GetPauseImageName fetches the pause image name for the same architecture as the apiserver.
-func GetPauseImageName(c clientset.Interface) string {
-	return imageutils.GetE2EImageWithArch(imageutils.Pause, GetServerArchitecture(c))
-}
-
 func GetServicesProxyRequest(c clientset.Interface, request *restclient.Request) (*restclient.Request, error) {
 	return request.Resource("services").SubResource("proxy"), nil
 }
@@ -270,7 +267,7 @@ type ContainerFailures struct {
 func GetMasterHost() string {
 	masterUrl, err := url.Parse(TestContext.Host)
 	ExpectNoError(err)
-	return masterUrl.Host
+	return masterUrl.Hostname()
 }
 
 func nowStamp() string {
@@ -506,7 +503,7 @@ func SkipUnlessServerVersionGTE(v *utilversion.Version, c discovery.ServerVersio
 	}
 }
 
-func SkipIfMissingResource(dynamicClient dynamic.DynamicInterface, gvr schema.GroupVersionResource, namespace string) {
+func SkipIfMissingResource(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, namespace string) {
 	resourceClient := dynamicClient.Resource(gvr).Namespace(namespace)
 	_, err := resourceClient.List(metav1.ListOptions{})
 	if err != nil {
@@ -701,10 +698,9 @@ func WaitForPodsRunningReady(c clientset.Interface, ns string, minPods, allowedN
 			case res && err == nil:
 				nOk++
 			case pod.Status.Phase == v1.PodSucceeded:
-				Logf("The status of Pod %s is Succeeded which is unexpected", pod.ObjectMeta.Name)
-				badPods = append(badPods, pod)
+				Logf("The status of Pod %s is Succeeded, skipping waiting", pod.ObjectMeta.Name)
 				// it doesn't make sense to wait for this pod
-				return false, errors.New("unexpected Succeeded pod state")
+				continue
 			case pod.Status.Phase != v1.PodFailed:
 				Logf("The status of Pod %s is %s (Ready = false), waiting for it to be either Running (with Ready = true) or Failed", pod.ObjectMeta.Name, pod.Status.Phase)
 				notReady++
@@ -735,6 +731,40 @@ func WaitForPodsRunningReady(c clientset.Interface, ns string, minPods, allowedN
 		Logf("Number of not-ready pods (%d) is below the allowed threshold (%d).", notReady, allowedNotReadyPods)
 	}
 	return nil
+}
+
+// WaitForDaemonSets for all daemonsets in the given namespace to be ready
+// (defined as all but 'allowedNotReadyNodes' pods associated with that
+// daemonset are ready).
+func WaitForDaemonSets(c clientset.Interface, ns string, allowedNotReadyNodes int32, timeout time.Duration) error {
+	start := time.Now()
+	Logf("Waiting up to %v for all daemonsets in namespace '%s' to start",
+		timeout, ns)
+
+	return wait.PollImmediate(Poll, timeout, func() (bool, error) {
+		dsList, err := c.AppsV1().DaemonSets(ns).List(metav1.ListOptions{})
+		if err != nil {
+			Logf("Error getting daemonsets in namespace: '%s': %v", ns, err)
+			if testutils.IsRetryableAPIError(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		var notReadyDaemonSets []string
+		for _, ds := range dsList.Items {
+			Logf("%d / %d pods ready in namespace '%s' in daemonset '%s' (%d seconds elapsed)", ds.Status.NumberReady, ds.Status.DesiredNumberScheduled, ns, ds.ObjectMeta.Name, int(time.Since(start).Seconds()))
+			if ds.Status.DesiredNumberScheduled-ds.Status.NumberReady > allowedNotReadyNodes {
+				notReadyDaemonSets = append(notReadyDaemonSets, ds.ObjectMeta.Name)
+			}
+		}
+
+		if len(notReadyDaemonSets) > 0 {
+			Logf("there are not ready daemonsets: %v", notReadyDaemonSets)
+			return false, nil
+		}
+
+		return true, nil
+	})
 }
 
 func kubectlLogPod(c clientset.Interface, pod v1.Pod, containerNameSubstr string, logFunc func(ftm string, args ...interface{})) {
@@ -861,7 +891,9 @@ func waitForServiceAccountInNamespace(c clientset.Interface, ns, serviceAccountN
 	if err != nil {
 		return err
 	}
-	_, err = watch.Until(timeout, w, conditions.ServiceAccountHasSecrets)
+	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err = watchtools.UntilWithoutRetry(ctx, w, conditions.ServiceAccountHasSecrets)
 	return err
 }
 
@@ -1086,7 +1118,7 @@ func CheckTestingNSDeletedExcept(c clientset.Interface, skip string) error {
 
 // deleteNS deletes the provided namespace, waits for it to be completely deleted, and then checks
 // whether there are any pods remaining in a non-terminating state.
-func deleteNS(c clientset.Interface, dynamicClient dynamic.DynamicInterface, namespace string, timeout time.Duration) error {
+func deleteNS(c clientset.Interface, dynamicClient dynamic.Interface, namespace string, timeout time.Duration) error {
 	startTime := time.Now()
 	if err := c.CoreV1().Namespaces().Delete(namespace, nil); err != nil {
 		return err
@@ -1141,7 +1173,7 @@ func deleteNS(c clientset.Interface, dynamicClient dynamic.DynamicInterface, nam
 		// no remaining content, but namespace was not deleted (namespace controller is probably wedged)
 		return fmt.Errorf("namespace %v was not deleted with limit: %v, namespace is empty but is not yet removed", namespace, err)
 	}
-	Logf("namespace %v deletion completed in %s", namespace, time.Now().Sub(startTime))
+	Logf("namespace %v deletion completed in %s", namespace, time.Since(startTime))
 	return nil
 }
 
@@ -1221,6 +1253,8 @@ func isDynamicDiscoveryError(err error) bool {
 			// garbage_collector
 		case "wardle.k8s.io":
 			// aggregator
+		case "metrics.k8s.io":
+			// aggregated metrics server add-on, no persisted resources
 		default:
 			Logf("discovery error for unexpected group: %#v", gv)
 			return false
@@ -1230,7 +1264,7 @@ func isDynamicDiscoveryError(err error) bool {
 }
 
 // hasRemainingContent checks if there is remaining content in the namespace via API discovery
-func hasRemainingContent(c clientset.Interface, dynamicClient dynamic.DynamicInterface, namespace string) (bool, error) {
+func hasRemainingContent(c clientset.Interface, dynamicClient dynamic.Interface, namespace string) (bool, error) {
 	// some tests generate their own framework.Client rather than the default
 	// TODO: ensure every test call has a configured dynamicClient
 	if dynamicClient == nil {
@@ -1575,7 +1609,9 @@ func WaitForRCToStabilize(c clientset.Interface, ns, name string, timeout time.D
 	if err != nil {
 		return err
 	}
-	_, err = watch.Until(timeout, w, func(event watch.Event) (bool, error) {
+	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err = watchtools.UntilWithoutRetry(ctx, w, func(event watch.Event) (bool, error) {
 		switch event.Type {
 		case watch.Deleted:
 			return false, apierrs.NewNotFound(schema.GroupResource{Resource: "replicationcontrollers"}, "")
@@ -2606,6 +2642,18 @@ func GetReadySchedulableNodesOrDie(c clientset.Interface) (nodes *v1.NodeList) {
 	return nodes
 }
 
+// GetReadyNodesIncludingTaintedOrDie returns all ready nodes, even those which are tainted.
+// There are cases when we care about tainted nodes
+// E.g. in tests related to nodes with gpu we care about nodes despite
+// presence of nvidia.com/gpu=present:NoSchedule taint
+func GetReadyNodesIncludingTaintedOrDie(c clientset.Interface) (nodes *v1.NodeList) {
+	nodes = waitListSchedulableNodesOrDie(c)
+	FilterNodes(nodes, func(node v1.Node) bool {
+		return isNodeSchedulable(&node)
+	})
+	return nodes
+}
+
 func WaitForAllNodesSchedulable(c clientset.Interface, timeout time.Duration) error {
 	Logf("Waiting up to %v for all (but %d) nodes to be schedulable", timeout, TestContext.AllowedNotReadyNodes)
 
@@ -2831,8 +2879,7 @@ func ScaleResource(
 	gr schema.GroupResource,
 ) error {
 	By(fmt.Sprintf("Scaling %v %s in namespace %s to %d", kind, name, ns, size))
-	scaler := kubectl.NewScaler(scalesGetter)
-	if err := testutils.ScaleResourceWithRetries(scaler, ns, name, size, gr); err != nil {
+	if err := testutils.ScaleResourceWithRetries(scalesGetter, ns, name, size, gr); err != nil {
 		return fmt.Errorf("error while scaling RC %s to %d replicas: %v", name, size, err)
 	}
 	if !wait {
@@ -3014,6 +3061,8 @@ func getReplicasFromRuntimeObject(obj runtime.Object) (int32, error) {
 			return *typed.Spec.Replicas, nil
 		}
 		return 0, nil
+	case *extensions.DaemonSet:
+		return 0, nil
 	case *batch.Job:
 		// TODO: currently we use pause pods so that's OK. When we'll want to switch to Pods
 		// that actually finish we need a better way to do this.
@@ -3024,50 +3073,6 @@ func getReplicasFromRuntimeObject(obj runtime.Object) (int32, error) {
 	default:
 		return -1, fmt.Errorf("Unsupported kind when getting number of replicas: %v", obj)
 	}
-}
-
-// DeleteResourceAndPods deletes a given resource and all pods it spawned
-func DeleteResourceAndPods(clientset clientset.Interface, internalClientset internalclientset.Interface, scaleClient scaleclient.ScalesGetter, kind schema.GroupKind, ns, name string) error {
-	By(fmt.Sprintf("deleting %v %s in namespace %s", kind, name, ns))
-
-	rtObject, err := getRuntimeObjectForKind(clientset, kind, ns, name)
-	if err != nil {
-		if apierrs.IsNotFound(err) {
-			Logf("%v %s not found: %v", kind, name, err)
-			return nil
-		}
-		return err
-	}
-	selector, err := getSelectorFromRuntimeObject(rtObject)
-	if err != nil {
-		return err
-	}
-	ps, err := testutils.NewPodStore(clientset, ns, selector, fields.Everything())
-	if err != nil {
-		return err
-	}
-	defer ps.Stop()
-	startTime := time.Now()
-	if err := testutils.DeleteResourceUsingReaperWithRetries(internalClientset, kind, ns, name, nil, scaleClient); err != nil {
-		return fmt.Errorf("error while stopping %v: %s: %v", kind, name, err)
-	}
-	deleteTime := time.Now().Sub(startTime)
-	Logf("Deleting %v %s took: %v", kind, name, deleteTime)
-	err = waitForPodsInactive(ps, 100*time.Millisecond, 10*time.Minute)
-	if err != nil {
-		return fmt.Errorf("error while waiting for pods to become inactive %s: %v", name, err)
-	}
-	terminatePodTime := time.Now().Sub(startTime) - deleteTime
-	Logf("Terminating %v %s pods took: %v", kind, name, terminatePodTime)
-	// this is to relieve namespace controller's pressure when deleting the
-	// namespace after a test.
-	err = waitForPodsGone(ps, 100*time.Millisecond, 10*time.Minute)
-	if err != nil {
-		return fmt.Errorf("error while waiting for pods gone %s: %v", name, err)
-	}
-	gcPodTime := time.Now().Sub(startTime) - terminatePodTime
-	Logf("Garbage collecting %v %s pods took: %v", kind, name, gcPodTime)
-	return nil
 }
 
 // DeleteResourceAndWaitForGC deletes only given resource and waits for GC to delete the pods.
@@ -3103,7 +3108,7 @@ func DeleteResourceAndWaitForGC(c clientset.Interface, kind schema.GroupKind, ns
 	if err := testutils.DeleteResourceWithRetries(c, kind, ns, name, deleteOption); err != nil {
 		return err
 	}
-	deleteTime := time.Now().Sub(startTime)
+	deleteTime := time.Since(startTime)
 	Logf("Deleting %v %s took: %v", kind, name, deleteTime)
 
 	var interval, timeout time.Duration
@@ -3127,7 +3132,7 @@ func DeleteResourceAndWaitForGC(c clientset.Interface, kind schema.GroupKind, ns
 	if err != nil {
 		return fmt.Errorf("error while waiting for pods to become inactive %s: %v", name, err)
 	}
-	terminatePodTime := time.Now().Sub(startTime) - deleteTime
+	terminatePodTime := time.Since(startTime) - deleteTime
 	Logf("Terminating %v %s pods took: %v", kind, name, terminatePodTime)
 
 	err = waitForPodsGone(ps, interval, 10*time.Minute)
@@ -3458,7 +3463,7 @@ func newExecPodSpec(ns, generateName string) *v1.Pod {
 				{
 					Name:    "exec",
 					Image:   BusyBoxImage,
-					Command: []string{"sh", "-c", "while true; do sleep 5; done"},
+					Command: []string{"sh", "-c", "trap exit TERM; while true; do sleep 5; done"},
 				},
 			},
 		},
@@ -4520,7 +4525,7 @@ func isElementOf(podUID types.UID, pods *v1.PodList) bool {
 const proxyTimeout = 2 * time.Minute
 
 // NodeProxyRequest performs a get on a node proxy endpoint given the nodename and rest client.
-func NodeProxyRequest(c clientset.Interface, node, endpoint string) (restclient.Result, error) {
+func NodeProxyRequest(c clientset.Interface, node, endpoint string, port int) (restclient.Result, error) {
 	// proxy tends to hang in some cases when Node is not ready. Add an artificial timeout for this call.
 	// This will leak a goroutine if proxy hangs. #22165
 	var result restclient.Result
@@ -4529,7 +4534,7 @@ func NodeProxyRequest(c clientset.Interface, node, endpoint string) (restclient.
 		result = c.CoreV1().RESTClient().Get().
 			Resource("nodes").
 			SubResource("proxy").
-			Name(fmt.Sprintf("%v:%v", node, ports.KubeletPort)).
+			Name(fmt.Sprintf("%v:%v", node, port)).
 			Suffix(endpoint).
 			Do()
 
@@ -4557,7 +4562,7 @@ func GetKubeletRunningPods(c clientset.Interface, node string) (*v1.PodList, err
 
 func getKubeletPods(c clientset.Interface, node, resource string) (*v1.PodList, error) {
 	result := &v1.PodList{}
-	client, err := NodeProxyRequest(c, node, resource)
+	client, err := NodeProxyRequest(c, node, resource, ports.KubeletPort)
 	if err != nil {
 		return &v1.PodList{}, err
 	}
@@ -5027,7 +5032,7 @@ func GetMasterAddress(c clientset.Interface) string {
 
 // GetNodeExternalIP returns node external IP concatenated with port 22 for ssh
 // e.g. 1.2.3.4:22
-func GetNodeExternalIP(node *v1.Node) string {
+func GetNodeExternalIP(node *v1.Node) (string, error) {
 	Logf("Getting external IP address for %s", node.Name)
 	host := ""
 	for _, a := range node.Status.Addresses {
@@ -5037,9 +5042,26 @@ func GetNodeExternalIP(node *v1.Node) string {
 		}
 	}
 	if host == "" {
-		Failf("Couldn't get the external IP of host %s with addresses %v", node.Name, node.Status.Addresses)
+		return "", fmt.Errorf("Couldn't get the external IP of host %s with addresses %v", node.Name, node.Status.Addresses)
 	}
-	return host
+	return host, nil
+}
+
+// GetNodeInternalIP returns node internal IP
+func GetNodeInternalIP(node *v1.Node) (string, error) {
+	host := ""
+	for _, address := range node.Status.Addresses {
+		if address.Type == v1.NodeInternalIP {
+			if address.Address != "" {
+				host = net.JoinHostPort(address.Address, sshPort)
+				break
+			}
+		}
+	}
+	if host == "" {
+		return "", fmt.Errorf("Couldn't get the external IP of host %s with addresses %v", node.Name, node.Status.Addresses)
+	}
+	return host, nil
 }
 
 // SimpleGET executes a get on the given url, returns error if non-200 returned.
@@ -5104,7 +5126,7 @@ func (f *Framework) NewTestPod(name string, requests v1.ResourceList, limits v1.
 			Containers: []v1.Container{
 				{
 					Name:  "pause",
-					Image: GetPauseImageName(f.ClientSet),
+					Image: imageutils.GetPauseImageName(),
 					Resources: v1.ResourceRequirements{
 						Requests: requests,
 						Limits:   limits,
@@ -5178,8 +5200,8 @@ func DumpDebugInfo(c clientset.Interface, ns string) {
 }
 
 // DsFromManifest reads a .json/yaml file and returns the daemonset in it.
-func DsFromManifest(url string) (*extensions.DaemonSet, error) {
-	var controller extensions.DaemonSet
+func DsFromManifest(url string) (*apps.DaemonSet, error) {
+	var controller apps.DaemonSet
 	Logf("Parsing ds from %v", url)
 
 	var response *http.Response

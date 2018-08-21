@@ -18,10 +18,10 @@ package cmd
 
 import (
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -34,10 +34,9 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 	"k8s.io/kubernetes/pkg/kubectl/validation"
-	"k8s.io/kubernetes/pkg/printers"
 )
 
 var (
@@ -66,7 +65,7 @@ var (
 )
 
 type ReplaceOptions struct {
-	PrintFlags  *printers.PrintFlags
+	PrintFlags  *genericclioptions.PrintFlags
 	DeleteFlags *DeleteFlags
 	RecordFlags *genericclioptions.RecordFlags
 
@@ -86,29 +85,20 @@ type ReplaceOptions struct {
 
 	Recorder genericclioptions.Recorder
 
-	Out    io.Writer
-	ErrOut io.Writer
+	genericclioptions.IOStreams
 }
 
-func NewReplaceOptions(out, errOut io.Writer) *ReplaceOptions {
-	outputFormat := ""
-
+func NewReplaceOptions(streams genericclioptions.IOStreams) *ReplaceOptions {
 	return &ReplaceOptions{
-		// TODO(juanvallejo): figure out why we only support the "name" outputFormat in this command
-		// we only support "-o name" for this command, so only register the name printer
-		PrintFlags: &printers.PrintFlags{
-			OutputFormat:   &outputFormat,
-			NamePrintFlags: printers.NewNamePrintFlags("replaced"),
-		},
+		PrintFlags:  genericclioptions.NewPrintFlags("replaced"),
 		DeleteFlags: NewDeleteFlags("to use to replace the resource."),
 
-		Out:    out,
-		ErrOut: errOut,
+		IOStreams: streams,
 	}
 }
 
-func NewCmdReplace(f cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
-	o := NewReplaceOptions(out, errOut)
+func NewCmdReplace(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
+	o := NewReplaceOptions(streams)
 
 	cmd := &cobra.Command{
 		Use: "replace -f FILENAME",
@@ -137,7 +127,7 @@ func NewCmdReplace(f cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
 func (o *ReplaceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	var err error
 
-	o.RecordFlags.Complete(f.Command(cmd, false))
+	o.RecordFlags.Complete(cmd)
 	o.Recorder, err = o.RecordFlags.ToRecorder()
 	if err != nil {
 		return err
@@ -154,11 +144,14 @@ func (o *ReplaceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []
 		return printer.PrintObj(obj, o.Out)
 	}
 
-	deleteOpts := o.DeleteFlags.ToOptions(o.Out, o.ErrOut)
+	dynamicClient, err := f.DynamicClient()
+	if err != nil {
+		return err
+	}
+	deleteOpts := o.DeleteFlags.ToOptions(dynamicClient, o.IOStreams)
 
 	//Replace will create a resource if it doesn't exist already, so ignore not found error
 	deleteOpts.IgnoreNotFound = true
-	deleteOpts.Reaper = f.Reaper
 	if o.PrintFlags.OutputFormat != nil {
 		deleteOpts.Output = *o.PrintFlags.OutputFormat
 	}
@@ -179,7 +172,7 @@ func (o *ReplaceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []
 	o.Builder = f.NewBuilder
 	o.BuilderArgs = args
 
-	o.Namespace, o.EnforceNamespace, err = f.DefaultNamespace()
+	o.Namespace, o.EnforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -273,25 +266,20 @@ func (o *ReplaceOptions) forceReplace() error {
 		return err
 	}
 
-	var err error
-
-	// By default use a reaper to delete all related resources.
-	if o.DeleteOptions.Cascade {
-		glog.Warningf("\"cascade\" is set, kubectl will delete and re-create all resources managed by this resource (e.g. Pods created by a ReplicationController). Consider using \"kubectl rolling-update\" if you want to update a ReplicationController together with its Pods.")
-		err = o.DeleteOptions.ReapResult(r, o.DeleteOptions.Cascade, false)
-	} else {
-		err = o.DeleteOptions.DeleteResult(r)
+	if err := o.DeleteOptions.DeleteResult(r); err != nil {
+		return err
 	}
 
+	timeout := o.DeleteOptions.Timeout
 	if timeout == 0 {
-		timeout = kubectl.Timeout
+		timeout = 5 * time.Minute
 	}
-	err = r.Visit(func(info *resource.Info, err error) error {
+	err := r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
 		}
 
-		return wait.PollImmediate(kubectl.Interval, timeout, func() (bool, error) {
+		return wait.PollImmediate(1*time.Second, timeout, func() (bool, error) {
 			if err := info.Get(); !errors.IsNotFound(err) {
 				return false, err
 			}

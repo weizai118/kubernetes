@@ -30,9 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 func TestCreateClusterRoleBinding(t *testing.T) {
@@ -68,16 +68,15 @@ func TestCreateClusterRoleBinding(t *testing.T) {
 		},
 	}
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	ns := legacyscheme.Codecs
+	ns := scheme.Codecs
 
 	info, _ := runtime.SerializerInfoForMediaType(ns.SupportedMediaTypes(), runtime.ContentTypeJSON)
 	encoder := ns.EncoderForVersion(info.Serializer, groupVersion)
 	decoder := ns.DecoderToVersion(info.Serializer, groupVersion)
 
-	tf.Namespace = "test"
 	tf.Client = &ClusterRoleBindingRESTClient{
 		RESTClient: &fake.RESTClient{
 			NegotiatedSerializer: ns,

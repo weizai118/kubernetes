@@ -35,7 +35,7 @@ import (
 	cmapi "k8s.io/metrics/pkg/apis/custom_metrics/v1beta1"
 	emapi "k8s.io/metrics/pkg/apis/external_metrics/v1beta1"
 	metricsapi "k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	metricsfake "k8s.io/metrics/pkg/client/clientset_generated/clientset/fake"
+	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 	cmfake "k8s.io/metrics/pkg/client/custom_metrics/fake"
 	emfake "k8s.io/metrics/pkg/client/external_metrics/fake"
 
@@ -154,7 +154,7 @@ func (tc *restClientTestCase) prepareTestClient(t *testing.T) (*metricsfake.Clie
 				return true, &metrics, nil
 			} else {
 				name := getForAction.GetName()
-				mapper := testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Registry, legacyscheme.Scheme)
+				mapper := testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)
 				assert.NotNil(t, tc.singleObject, "should have only requested a single-object metric when we asked for metrics for a single object")
 				gk := schema.FromAPIVersionAndKind(tc.singleObject.APIVersion, tc.singleObject.Kind).GroupKind()
 				mapping, err := mapper.RESTMapping(gk)

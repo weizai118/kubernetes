@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
@@ -31,10 +30,10 @@ import (
 func TestPatchObject(t *testing.T) {
 	_, svc, _ := testData()
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -55,7 +54,6 @@ func TestPatchObject(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
 	cmd := NewCmdPatch(tf, stream)
@@ -73,10 +71,10 @@ func TestPatchObject(t *testing.T) {
 func TestPatchObjectFromFile(t *testing.T) {
 	_, svc, _ := testData()
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -90,7 +88,6 @@ func TestPatchObjectFromFile(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
 	cmd := NewCmdPatch(tf, stream)
@@ -111,10 +108,10 @@ func TestPatchNoop(t *testing.T) {
 	getObject := &svc.Items[0]
 	patchObject := &svc.Items[0]
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -130,7 +127,6 @@ func TestPatchNoop(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 
 	// Patched
 	{
@@ -159,10 +155,10 @@ func TestPatchObjectFromFileOutput(t *testing.T) {
 	}
 	svcCopy.Labels["post-patch"] = "post-patch-value"
 
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -178,7 +174,6 @@ func TestPatchObjectFromFileOutput(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
 	cmd := NewCmdPatch(tf, stream)

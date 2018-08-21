@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2017-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
 	"github.com/golang/glog"
 
 	"k8s.io/api/core/v1"
@@ -52,12 +52,15 @@ type azureDiskAttacher struct {
 var _ volume.Attacher = &azureDiskAttacher{}
 var _ volume.Detacher = &azureDiskDetacher{}
 
+var _ volume.DeviceMounter = &azureDiskAttacher{}
+var _ volume.DeviceUnmounter = &azureDiskDetacher{}
+
 // acquire lock to get an lun number
 var getLunMutex = keymutex.NewKeyMutex()
 
 // Attach attaches a volume.Spec to an Azure VM referenced by NodeName, returning the disk's LUN
 func (a *azureDiskAttacher) Attach(spec *volume.Spec, nodeName types.NodeName) (string, error) {
-	volumeSource, err := getVolumeSource(spec)
+	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
 		glog.Warningf("failed to get azure disk spec (%v)", err)
 		return "", err
@@ -114,7 +117,7 @@ func (a *azureDiskAttacher) VolumesAreAttached(specs []*volume.Spec, nodeName ty
 	volumeSpecMap := make(map[string]*volume.Spec)
 	volumeIDList := []string{}
 	for _, spec := range specs {
-		volumeSource, err := getVolumeSource(spec)
+		volumeSource, _, err := getVolumeSource(spec)
 		if err != nil {
 			glog.Errorf("azureDisk - Error getting volume (%q) source : %v", spec.Name(), err)
 			continue
@@ -151,7 +154,7 @@ func (a *azureDiskAttacher) VolumesAreAttached(specs []*volume.Spec, nodeName ty
 func (a *azureDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, _ *v1.Pod, timeout time.Duration) (string, error) {
 	var err error
 
-	volumeSource, err := getVolumeSource(spec)
+	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
 		return "", err
 	}
@@ -185,10 +188,6 @@ func (a *azureDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, 
 
 		// did we find it?
 		if newDevicePath != "" {
-			// the current sequence k8s uses for unformated disk (check-disk, mount, fail, mkfs.extX) hangs on
-			// Azure Managed disk scsi interface. this is a hack and will be replaced once we identify and solve
-			// the root case on Azure.
-			formatIfNotFormatted(newDevicePath, *volumeSource.FSType, exec)
 			return true, nil
 		}
 
@@ -203,7 +202,7 @@ func (a *azureDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, 
 // this is generalized for both managed and blob disks
 // we also prefix the hash with m/b based on disk kind
 func (a *azureDiskAttacher) GetDeviceMountPath(spec *volume.Spec) (string, error) {
-	volumeSource, err := getVolumeSource(spec)
+	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
 		return "", err
 	}
@@ -250,7 +249,7 @@ func (attacher *azureDiskAttacher) MountDevice(spec *volume.Spec, devicePath str
 		}
 	}
 
-	volumeSource, err := getVolumeSource(spec)
+	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
 		return err
 	}

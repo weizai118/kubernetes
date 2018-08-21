@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/tools/clientcmd/api/latest"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
@@ -33,7 +34,7 @@ import (
 )
 
 type ViewOptions struct {
-	PrintFlags  *kubectlConfigPrintFlags
+	PrintFlags  *genericclioptions.PrintFlags
 	PrintObject printers.ResourcePrinterFunc
 
 	ConfigAccess clientcmd.ConfigAccess
@@ -42,6 +43,7 @@ type ViewOptions struct {
 	Minify       bool
 	RawByteData  bool
 
+	Context      string
 	OutputFormat string
 
 	genericclioptions.IOStreams
@@ -68,7 +70,7 @@ var (
 
 func NewCmdConfigView(f cmdutil.Factory, streams genericclioptions.IOStreams, ConfigAccess clientcmd.ConfigAccess) *cobra.Command {
 	o := &ViewOptions{
-		PrintFlags:   newKubeConfigPrintFlags("").WithDefaultOutput("yaml"),
+		PrintFlags:   genericclioptions.NewPrintFlags("").WithTypeSetter(legacyscheme.Scheme).WithDefaultOutput("yaml"),
 		ConfigAccess: ConfigAccess,
 
 		IOStreams: streams,
@@ -109,6 +111,7 @@ func (o *ViewOptions) Complete(cmd *cobra.Command) error {
 		return err
 	}
 	o.PrintObject = printer.PrintObj
+	o.Context = cmdutil.GetFlagString(cmd, "context")
 
 	return nil
 }
@@ -128,6 +131,9 @@ func (o ViewOptions) Run() error {
 	}
 
 	if o.Minify {
+		if len(o.Context) > 0 {
+			config.CurrentContext = o.Context
+		}
 		if err := clientcmdapi.MinifyConfig(config); err != nil {
 			return err
 		}

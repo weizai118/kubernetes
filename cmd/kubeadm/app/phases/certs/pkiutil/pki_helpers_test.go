@@ -30,7 +30,7 @@ import (
 )
 
 func TestNewCertificateAuthority(t *testing.T) {
-	cert, key, err := NewCertificateAuthority()
+	cert, key, err := NewCertificateAuthority(&certutil.Config{CommonName: "kubernetes"})
 
 	if cert == nil {
 		t.Errorf(
@@ -73,7 +73,7 @@ func TestNewCertAndKey(t *testing.T) {
 			t.Fatalf("Couldn't create rsa Private Key")
 		}
 		caCert := &x509.Certificate{}
-		config := certutil.Config{
+		config := &certutil.Config{
 			CommonName:   "test",
 			Organization: []string{"test"},
 			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -90,7 +90,7 @@ func TestNewCertAndKey(t *testing.T) {
 }
 
 func TestHasServerAuth(t *testing.T) {
-	caCert, caKey, _ := NewCertificateAuthority()
+	caCert, caKey, _ := NewCertificateAuthority(&certutil.Config{CommonName: "kubernetes"})
 
 	var tests = []struct {
 		config   certutil.Config
@@ -113,7 +113,7 @@ func TestHasServerAuth(t *testing.T) {
 	}
 
 	for _, rt := range tests {
-		cert, _, err := NewCertAndKey(caCert, caKey, rt.config)
+		cert, _, err := NewCertAndKey(caCert, caKey, &rt.config)
 		if err != nil {
 			t.Fatalf("Couldn't create cert: %v", err)
 		}
@@ -261,7 +261,7 @@ func TestTryLoadCertAndKeyFromDisk(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpdir)
 
-	caCert, caKey, err := NewCertificateAuthority()
+	caCert, caKey, err := NewCertificateAuthority(&certutil.Config{CommonName: "kubernetes"})
 	if err != nil {
 		t.Errorf(
 			"failed to create cert and key with an error: %v",
@@ -311,7 +311,7 @@ func TestTryLoadCertFromDisk(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpdir)
 
-	caCert, _, err := NewCertificateAuthority()
+	caCert, _, err := NewCertificateAuthority(&certutil.Config{CommonName: "kubernetes"})
 	if err != nil {
 		t.Errorf(
 			"failed to create cert and key with an error: %v",
@@ -361,7 +361,7 @@ func TestTryLoadKeyFromDisk(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpdir)
 
-	_, caKey, err := NewCertificateAuthority()
+	_, caKey, err := NewCertificateAuthority(&certutil.Config{CommonName: "kubernetes"})
 	if err != nil {
 		t.Errorf(
 			"failed to create cert and key with an error: %v",
@@ -439,16 +439,16 @@ func TestGetAPIServerAltNames(t *testing.T) {
 
 	var tests = []struct {
 		name                string
-		cfg                 *kubeadmapi.MasterConfiguration
+		cfg                 *kubeadmapi.InitConfiguration
 		expectedDNSNames    []string
 		expectedIPAddresses []string
 	}{
 		{
 			name: "ControlPlaneEndpoint DNS",
-			cfg: &kubeadmapi.MasterConfiguration{
+			cfg: &kubeadmapi.InitConfiguration{
 				API:               kubeadmapi.API{AdvertiseAddress: "1.2.3.4", ControlPlaneEndpoint: "api.k8s.io:6443"},
 				Networking:        kubeadmapi.Networking{ServiceSubnet: "10.96.0.0/12", DNSDomain: "cluster.local"},
-				NodeName:          "valid-hostname",
+				NodeRegistration:  kubeadmapi.NodeRegistrationOptions{Name: "valid-hostname"},
 				APIServerCertSANs: []string{"10.1.245.94", "10.1.245.95", "1.2.3.L", "invalid,commas,in,DNS"},
 			},
 			expectedDNSNames:    []string{"valid-hostname", "kubernetes", "kubernetes.default", "kubernetes.default.svc", "kubernetes.default.svc.cluster.local", "api.k8s.io"},
@@ -456,10 +456,10 @@ func TestGetAPIServerAltNames(t *testing.T) {
 		},
 		{
 			name: "ControlPlaneEndpoint IP",
-			cfg: &kubeadmapi.MasterConfiguration{
+			cfg: &kubeadmapi.InitConfiguration{
 				API:               kubeadmapi.API{AdvertiseAddress: "1.2.3.4", ControlPlaneEndpoint: "4.5.6.7:6443"},
 				Networking:        kubeadmapi.Networking{ServiceSubnet: "10.96.0.0/12", DNSDomain: "cluster.local"},
-				NodeName:          "valid-hostname",
+				NodeRegistration:  kubeadmapi.NodeRegistrationOptions{Name: "valid-hostname"},
 				APIServerCertSANs: []string{"10.1.245.94", "10.1.245.95", "1.2.3.L", "invalid,commas,in,DNS"},
 			},
 			expectedDNSNames:    []string{"valid-hostname", "kubernetes", "kubernetes.default", "kubernetes.default.svc", "kubernetes.default.svc.cluster.local"},
@@ -506,13 +506,15 @@ func TestGetAPIServerAltNames(t *testing.T) {
 func TestGetEtcdAltNames(t *testing.T) {
 	proxy := "user-etcd-proxy"
 	proxyIP := "10.10.10.100"
-	cfg := &kubeadmapi.MasterConfiguration{
+	cfg := &kubeadmapi.InitConfiguration{
 		Etcd: kubeadmapi.Etcd{
-			ServerCertSANs: []string{
-				proxy,
-				proxyIP,
-				"1.2.3.L",
-				"invalid,commas,in,DNS",
+			Local: &kubeadmapi.LocalEtcd{
+				ServerCertSANs: []string{
+					proxy,
+					proxyIP,
+					"1.2.3.L",
+					"invalid,commas,in,DNS",
+				},
 			},
 		},
 	}
@@ -537,7 +539,7 @@ func TestGetEtcdAltNames(t *testing.T) {
 		}
 	}
 
-	expectedIPAddresses := []string{"127.0.0.1", proxyIP}
+	expectedIPAddresses := []string{"127.0.0.1", net.IPv6loopback.String(), proxyIP}
 	for _, IPAddress := range expectedIPAddresses {
 		found := false
 		for _, val := range altNames.IPs {
@@ -558,15 +560,17 @@ func TestGetEtcdPeerAltNames(t *testing.T) {
 	proxy := "user-etcd-proxy"
 	proxyIP := "10.10.10.100"
 	advertiseIP := "1.2.3.4"
-	cfg := &kubeadmapi.MasterConfiguration{
-		API:      kubeadmapi.API{AdvertiseAddress: advertiseIP},
-		NodeName: hostname,
+	cfg := &kubeadmapi.InitConfiguration{
+		API:              kubeadmapi.API{AdvertiseAddress: advertiseIP},
+		NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: hostname},
 		Etcd: kubeadmapi.Etcd{
-			PeerCertSANs: []string{
-				proxy,
-				proxyIP,
-				"1.2.3.L",
-				"invalid,commas,in,DNS",
+			Local: &kubeadmapi.LocalEtcd{
+				PeerCertSANs: []string{
+					proxy,
+					proxyIP,
+					"1.2.3.L",
+					"invalid,commas,in,DNS",
+				},
 			},
 		},
 	}

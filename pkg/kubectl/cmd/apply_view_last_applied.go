@@ -27,7 +27,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
@@ -91,7 +91,7 @@ func NewCmdApplyViewLastApplied(f cmdutil.Factory, ioStreams genericclioptions.I
 }
 
 func (o *ViewLastAppliedOptions) Complete(cmd *cobra.Command, f cmdutil.Factory, args []string) error {
-	cmdNamespace, enforceNamespace, err := f.DefaultNamespace()
+	cmdNamespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}

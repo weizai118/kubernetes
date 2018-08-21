@@ -27,7 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest/fake"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
@@ -322,10 +321,9 @@ func TestLabelErrors(t *testing.T) {
 
 	for k, testCase := range testCases {
 		t.Run(k, func(t *testing.T) {
-			tf := cmdtesting.NewTestFactory()
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
 			defer tf.Cleanup()
 
-			tf.Namespace = "test"
 			tf.ClientConfigVal = defaultClientConfig()
 
 			ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
@@ -357,10 +355,10 @@ func TestLabelErrors(t *testing.T) {
 
 func TestLabelForResourceFromFile(t *testing.T) {
 	pods, _, _ := testData()
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -388,7 +386,6 @@ func TestLabelForResourceFromFile(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()
@@ -411,7 +408,7 @@ func TestLabelForResourceFromFile(t *testing.T) {
 }
 
 func TestLabelLocal(t *testing.T) {
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
 	tf.UnstructuredClient = &fake.RESTClient{
@@ -421,7 +418,6 @@ func TestLabelLocal(t *testing.T) {
 			return nil, nil
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()
@@ -446,10 +442,10 @@ func TestLabelLocal(t *testing.T) {
 
 func TestLabelMultipleObjects(t *testing.T) {
 	pods, _, _ := testData()
-	tf := cmdtesting.NewTestFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
 	defer tf.Cleanup()
 
-	codec := legacyscheme.Codecs.LegacyCodec(scheme.Versions...)
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
 
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
@@ -479,7 +475,6 @@ func TestLabelMultipleObjects(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 	tf.ClientConfigVal = defaultClientConfig()
 
 	ioStreams, _, buf, _ := genericclioptions.NewTestIOStreams()

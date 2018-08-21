@@ -22,19 +22,18 @@ import (
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apiserver/pkg/admission"
+	apiserveradmission "k8s.io/apiserver/pkg/admission/initializer"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/informers"
+	corev1lister "k8s.io/client-go/listers/core/v1"
 	podutil "k8s.io/kubernetes/pkg/api/pod"
 	authenticationapi "k8s.io/kubernetes/pkg/apis/authentication"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	coreinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/features"
-	kubeapiserveradmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 )
 
 const (
@@ -62,18 +61,18 @@ func NewPlugin(nodeIdentifier nodeidentifier.NodeIdentifier) *nodePlugin {
 type nodePlugin struct {
 	*admission.Handler
 	nodeIdentifier nodeidentifier.NodeIdentifier
-	podsGetter     coreinternalversion.PodsGetter
+	podsGetter     corev1lister.PodLister
 	// allows overriding for testing
 	features utilfeature.FeatureGate
 }
 
 var (
 	_ = admission.Interface(&nodePlugin{})
-	_ = kubeapiserveradmission.WantsInternalKubeClientSet(&nodePlugin{})
+	_ = apiserveradmission.WantsExternalKubeInformerFactory(&nodePlugin{})
 )
 
-func (p *nodePlugin) SetInternalKubeClientSet(f internalclientset.Interface) {
-	p.podsGetter = f.Core()
+func (p *nodePlugin) SetExternalKubeInformerFactory(f informers.SharedInformerFactory) {
+	p.podsGetter = f.Core().V1().Pods().Lister()
 }
 
 func (p *nodePlugin) ValidateInitialization() error {
@@ -183,14 +182,10 @@ func (c *nodePlugin) admitPod(nodeName string, a admission.Attributes) error {
 		return nil
 
 	case admission.Delete:
-		// get the existing pod from the server cache
-		existingPod, err := c.podsGetter.Pods(a.GetNamespace()).Get(a.GetName(), v1.GetOptions{ResourceVersion: "0"})
+		// get the existing pod
+		existingPod, err := c.podsGetter.Pods(a.GetNamespace()).Get(a.GetName())
 		if errors.IsNotFound(err) {
-			// wasn't found in the server cache, do a live lookup before forbidding
-			existingPod, err = c.podsGetter.Pods(a.GetNamespace()).Get(a.GetName(), v1.GetOptions{})
-			if errors.IsNotFound(err) {
-				return err
-			}
+			return err
 		}
 		if err != nil {
 			return admission.NewForbidden(a, err)
@@ -241,14 +236,10 @@ func (c *nodePlugin) admitPodEviction(nodeName string, a admission.Attributes) e
 			}
 			podName = eviction.Name
 		}
-		// get the existing pod from the server cache
-		existingPod, err := c.podsGetter.Pods(a.GetNamespace()).Get(podName, v1.GetOptions{ResourceVersion: "0"})
+		// get the existing pod
+		existingPod, err := c.podsGetter.Pods(a.GetNamespace()).Get(podName)
 		if errors.IsNotFound(err) {
-			// wasn't found in the server cache, do a live lookup before forbidding
-			existingPod, err = c.podsGetter.Pods(a.GetNamespace()).Get(podName, v1.GetOptions{})
-			if errors.IsNotFound(err) {
-				return err
-			}
+			return err
 		}
 		if err != nil {
 			return admission.NewForbidden(a, err)
@@ -347,6 +338,12 @@ func (c *nodePlugin) admitNode(nodeName string, a admission.Attributes) error {
 		if node.Spec.ConfigSource != nil && !apiequality.Semantic.DeepEqual(node.Spec.ConfigSource, oldNode.Spec.ConfigSource) {
 			return admission.NewForbidden(a, fmt.Errorf("cannot update configSource to a new non-nil configSource"))
 		}
+
+		// Don't allow a node to update its own taints. This would allow a node to remove or modify its
+		// taints in a way that would let it steer disallowed workloads to itself.
+		if !apiequality.Semantic.DeepEqual(node.Spec.Taints, oldNode.Spec.Taints) {
+			return admission.NewForbidden(a, fmt.Errorf("cannot modify taints"))
+		}
 	}
 
 	return nil
@@ -376,7 +373,7 @@ func (c *nodePlugin) admitServiceAccount(nodeName string, a admission.Attributes
 	if ref.UID == "" {
 		return admission.NewForbidden(a, fmt.Errorf("node requested token with a pod binding without a uid"))
 	}
-	pod, err := c.podsGetter.Pods(a.GetNamespace()).Get(ref.Name, v1.GetOptions{})
+	pod, err := c.podsGetter.Pods(a.GetNamespace()).Get(ref.Name)
 	if errors.IsNotFound(err) {
 		return err
 	}

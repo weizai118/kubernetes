@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/clientcmd"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
@@ -69,7 +70,7 @@ type Framework struct {
 
 	InternalClientset *internalclientset.Clientset
 	AggregatorClient  *aggregatorclient.Clientset
-	DynamicClient     dynamic.DynamicInterface
+	DynamicClient     dynamic.Interface
 
 	ScalesGetter scaleclient.ScalesGetter
 
@@ -88,6 +89,9 @@ type Framework struct {
 	logsSizeWaitGroup    sync.WaitGroup
 	logsSizeCloseChannel chan bool
 	logsSizeVerifier     *LogsSizeVerifier
+
+	// Flaky operation failures in an e2e test can be captured through this.
+	flakeReport *FlakeReport
 
 	// To make sure that this framework cleans up after itself, no matter what,
 	// we install a Cleanup action before each test and clear it after.  If we
@@ -182,7 +186,7 @@ func (f *Framework) BeforeEach() {
 		discoClient, err := discovery.NewDiscoveryClientForConfig(config)
 		Expect(err).NotTo(HaveOccurred())
 		cachedDiscoClient := cacheddiscovery.NewMemCacheClient(discoClient)
-		restMapper := discovery.NewDeferredDiscoveryRESTMapper(cachedDiscoClient)
+		restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscoClient)
 		restMapper.Reset()
 		resolver := scaleclient.NewDiscoveryScaleKindResolver(cachedDiscoClient)
 		f.ScalesGetter = scaleclient.New(restClient, restMapper, dynamic.LegacyAPIPathResolverFunc, resolver)
@@ -209,7 +213,7 @@ func (f *Framework) BeforeEach() {
 	}
 
 	if !f.SkipNamespaceCreation {
-		By("Building a namespace api object")
+		By(fmt.Sprintf("Building a namespace api object, basename %s", f.BaseName))
 		namespace, err := f.CreateNamespace(f.BaseName, map[string]string{
 			"e2e-framework": f.BaseName,
 		})
@@ -268,6 +272,8 @@ func (f *Framework) BeforeEach() {
 		}
 
 	}
+
+	f.flakeReport = NewFlakeReport()
 }
 
 // AfterEach deletes the namespace, after reading its events.
@@ -381,6 +387,12 @@ func (f *Framework) AfterEach() {
 		close(f.kubemarkControllerCloseChannel)
 	}
 
+	// Report any flakes that were observed in the e2e test and reset.
+	if f.flakeReport != nil && f.flakeReport.GetFlakeCount() > 0 {
+		f.TestSummaries = append(f.TestSummaries, f.flakeReport)
+		f.flakeReport = nil
+	}
+
 	PrintSummaries(f.TestSummaries, f.BaseName)
 
 	// Check whether all nodes are ready after the test.
@@ -406,6 +418,10 @@ func (f *Framework) CreateNamespace(baseName string, labels map[string]string) (
 	}
 
 	return ns, err
+}
+
+func (f *Framework) RecordFlakeIfError(err error, optionalDescription ...interface{}) {
+	f.flakeReport.RecordFlakeIfError(err, optionalDescription)
 }
 
 // AddNamespacesToDelete adds one or more namespaces to be deleted when the test
@@ -532,7 +548,7 @@ func (f *Framework) CreateServiceForSimpleApp(contPort, svcPort int, appName str
 			return nil
 		} else {
 			return []v1.ServicePort{{
-				Protocol:   "TCP",
+				Protocol:   v1.ProtocolTCP,
 				Port:       int32(svcPort),
 				TargetPort: intstr.FromInt(contPort),
 			}}

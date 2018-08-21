@@ -30,7 +30,6 @@ kube::golang::server_targets() {
     cmd/kubeadm
     cmd/hyperkube
     cmd/kube-scheduler
-    vendor/k8s.io/kube-aggregator
     vendor/k8s.io/apiextensions-apiserver
     cluster/gce/gci/mounter
   )
@@ -208,17 +207,31 @@ readonly KUBE_STATIC_LIBRARIES=(
   kube-controller-manager
   kube-scheduler
   kube-proxy
-  kube-aggregator
   kubeadm
   kubectl
 )
 
+# KUBE_CGO_OVERRIDES is a space-separated list of binaries which should be built
+# with CGO enabled, assuming CGO is supported on the target platform.
+# This overrides any entry in KUBE_STATIC_LIBRARIES.
+IFS=" " read -ra KUBE_CGO_OVERRIDES <<< "${KUBE_CGO_OVERRIDES:-}"
+readonly KUBE_CGO_OVERRIDES
+# KUBE_STATIC_OVERRIDES is a space-separated list of binaries which should be
+# built with CGO disabled. This is in addition to the list in
+# KUBE_STATIC_LIBRARIES.
+IFS=" " read -ra KUBE_STATIC_OVERRIDES <<< "${KUBE_STATIC_OVERRIDES:-}"
+readonly KUBE_STATIC_OVERRIDES
+
 kube::golang::is_statically_linked_library() {
   local e
+  # Explicitly enable cgo when building kubectl for darwin from darwin.
+  [[ "$(go env GOHOSTOS)" == "darwin" && "$(go env GOOS)" == "darwin" &&
+    "$1" == *"/kubectl" ]] && return 1
+  if [[ -n "${KUBE_CGO_OVERRIDES:+x}" ]]; then
+    for e in "${KUBE_CGO_OVERRIDES[@]}"; do [[ "$1" == *"/$e" ]] && return 1; done;
+  fi
   for e in "${KUBE_STATIC_LIBRARIES[@]}"; do [[ "$1" == *"/$e" ]] && return 0; done;
-  # Allow individual overrides--e.g., so that you can get a static build of
-  # kubectl for inclusion in a container.
-  if [ -n "${KUBE_STATIC_OVERRIDES:+x}" ]; then
+  if [[ -n "${KUBE_STATIC_OVERRIDES:+x}" ]]; then
     for e in "${KUBE_STATIC_OVERRIDES[@]}"; do [[ "$1" == *"/$e" ]] && return 0; done;
   fi
   return 1;
