@@ -26,13 +26,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericclioptions/resource"
 	batchv1client "k8s.io/client-go/kubernetes/typed/batch/v1"
-	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/kubectl/genericclioptions"
-	"k8s.io/kubernetes/pkg/kubectl/genericclioptions/resource"
 	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/templates"
 )
 
 var (
@@ -50,6 +50,7 @@ var (
 		kubectl create job test-job --from=cronjob/a-cronjob`))
 )
 
+// CreateJobOptions is the command line options for 'create job'
 type CreateJobOptions struct {
 	PrintFlags *genericclioptions.PrintFlags
 
@@ -69,6 +70,7 @@ type CreateJobOptions struct {
 	genericclioptions.IOStreams
 }
 
+// NewCreateJobOptions initializes and returns new CreateJobOptions instance
 func NewCreateJobOptions(ioStreams genericclioptions.IOStreams) *CreateJobOptions {
 	return &CreateJobOptions{
 		PrintFlags: genericclioptions.NewPrintFlags("created").WithTypeSetter(scheme.Scheme),
@@ -85,8 +87,7 @@ func NewCmdCreateJob(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *
 		Long:    jobLong,
 		Example: jobExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			argsLenAtDash := cmd.ArgsLenAtDash()
-			cmdutil.CheckErr(o.Complete(f, cmd, args, argsLenAtDash))
+			cmdutil.CheckErr(o.Complete(f, cmd, args))
 			cmdutil.CheckErr(o.Validate())
 			cmdutil.CheckErr(o.Run())
 		},
@@ -103,11 +104,13 @@ func NewCmdCreateJob(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *
 	return cmd
 }
 
-func (o *CreateJobOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string, argsLenAtDash int) error {
-	if len(args) == 0 || argsLenAtDash == 0 {
-		return cmdutil.UsageErrorf(cmd, "NAME is required")
+// Complete completes all the required options
+func (o *CreateJobOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
+	name, err := NameFromCommandArgs(cmd, args)
+	if err != nil {
+		return err
 	}
-	o.Name = args[0]
+	o.Name = name
 	if len(args) > 1 {
 		o.Command = args[1:]
 	}
@@ -143,6 +146,7 @@ func (o *CreateJobOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args 
 	return nil
 }
 
+// Validate makes sure provided values and valid Job options
 func (o *CreateJobOptions) Validate() error {
 	if (len(o.Image) == 0 && len(o.From) == 0) || (len(o.Image) != 0 && len(o.From) != 0) {
 		return fmt.Errorf("either --image or --from must be specified")
@@ -153,6 +157,7 @@ func (o *CreateJobOptions) Validate() error {
 	return nil
 }
 
+// Run performs the execution of 'create job' sub command
 func (o *CreateJobOptions) Run() error {
 	var job *batchv1.Job
 	if len(o.Image) > 0 {
